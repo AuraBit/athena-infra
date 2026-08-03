@@ -14,3 +14,25 @@ output "vpc_cidr_block" {
   description = "CIDR block of the dev core-network VPC."
   value       = module.core_network.vpc_cidr_block
 }
+
+# --- Plan 02-03, Task 1: subnet outputs -------------------------------------
+
+output "public_subnet_ids" {
+  description = "IDs of dev's public-tier subnets."
+  value       = module.core_network.public_subnet_ids
+}
+
+output "private_app_subnet_ids" {
+  description = "IDs of dev's private-app-tier subnets."
+  value       = module.core_network.private_app_subnet_ids
+}
+
+output "private_data_subnet_ids" {
+  description = "IDs of dev's private-data-tier subnets."
+  value       = module.core_network.private_data_subnet_ids
+}
+
+output "subnet_ids_by_tier" {
+  description = "Map of tier name -> list of subnet ids in that tier, for dev."
+  value       = module.core_network.subnet_ids_by_tier
+}
