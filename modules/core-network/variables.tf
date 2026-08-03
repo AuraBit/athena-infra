@@ -47,3 +47,18 @@ variable "subnet_newbits" {
   type        = number
   default     = 4
 }
+
+# --- Plan 02-03, Task 2: NAT egress toggle ----------------------------------
+
+variable "single_nat_gateway" {
+  description = <<-EOT
+    true  -> one shared NAT gateway for every AZ's private-app subnets
+             (lower fixed cost; an AZ outage removes private-app egress
+             entirely, since there is no cross-AZ NAT to fall back to).
+    false -> one NAT gateway per AZ (N times the fixed cost; an AZ outage
+             only removes egress for that one AZ). Production uses false;
+             dev's default of true takes the cost saving (D-22).
+  EOT
+  type        = bool
+  default     = true
+}
