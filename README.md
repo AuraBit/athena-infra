@@ -6,7 +6,9 @@ full estate-level story). This repo owns:
 
 - **Terraform** lifecycle stacks: Core/Network, Data/Storage, Application/Compute
   (Phase 2 / Phase 6), plus the GitHub **governance stack** (Phase 1) managing
-  the `athena-platform` org, teams, repos, branch protection, and Environments.
+  the `AuraBit` org (D-05/D-06; the plan's originally-assumed login
+  `athena-platform` was already taken by an unrelated account), teams, repos,
+  branch protection, and Environments.
 - **Ansible** roles scoped narrowly to host bootstrap and provisioning: the
   `bootstrap-dns` role (wildcard DNS for the `athena.net` domain fiction) and,
   from Phase 6, the self-hosted GitHub Actions runner role.
