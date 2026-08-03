@@ -1,0 +1,57 @@
+# gateway.yaml — Gateway API objects for the app cluster (Plan 01, Task 2;
+# CONTEXT.md D-11/D-13). Namespace `gateway` for all three objects.
+#
+# GatewayClass.controllerName is Envoy Gateway's own controller identity,
+# confirmed directly against envoyproxy/gateway's own v1.8.3 quickstart
+# manifest (gateway.envoyproxy.io/gatewayclass-controller).
+#
+# The Certificate is declarative (not an imperative `kubectl create secret
+# tls`) per D-13 — an imperatively created TLS secret would be permanent
+# ArgoCD drift once Phase 3's GitOps layer lands. It requests both the
+# wildcard and the apex name from `mkcert-issuer` (clusters/common/
+# mkcert-clusterissuer.yaml) into the secret the Gateway's listener serves.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: envoy
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: athena-net-wildcard
+  namespace: gateway
+spec:
+  secretName: athena-net-wildcard-tls
+  issuerRef:
+    name: mkcert-issuer
+    kind: ClusterIssuer
+  dnsNames:
+    - "athena.net"
+    - "*.athena.net"
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: athena
+  namespace: gateway
+spec:
+  gatewayClassName: envoy
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: "*.athena.net"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: athena-net-wildcard-tls
+      allowedRoutes:
+        namespaces:
+          from: All

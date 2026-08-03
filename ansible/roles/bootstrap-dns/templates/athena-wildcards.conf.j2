@@ -1,0 +1,15 @@
+# {{ ansible_managed }}
+# athena-wildcards.conf — dnsmasq wildcard DNS for the athena.net domain fiction
+# (Plan 01, Task 2; CONTEXT.md D-12).
+#
+# `address=/<domain>/<ip>` matches the domain itself and every subdomain of
+# it (verified against `man dnsmasq` 2.93 on this host — this is the correct
+# directive for a wildcard, not `server=` (forwards *queries* for a domain to
+# another resolver) or `local=` (marks a domain as authoritative-with-no-data,
+# which would return NXDOMAIN instead of an address)).
+#
+# dnsmasq resolves the *most specific* matching domain first, so
+# `*.platform.athena.net` correctly hits the platform.athena.net line below
+# even though it is also technically a subdomain of athena.net.
+address=/athena.net/127.0.0.1
+address=/platform.athena.net/127.0.0.2

@@ -1,0 +1,133 @@
+---
+# bootstrap-dns role — dnsmasq wildcard DNS for the athena.net domain fiction
+# (Plan 01, Task 2; CONTEXT.md D-12).
+#
+# End state: dnsmasq listens on 127.0.0.1:53, serves *.athena.net -> 127.0.0.1
+# and *.platform.athena.net -> 127.0.0.2 from a wildcard config, forwards
+# every other query to public upstream resolvers, and the host's own
+# resolver (/etc/resolv.conf) points at 127.0.0.1 so no per-subdomain hosts
+# entry is ever needed (nip.io/hosts-file are explicitly rejected/
+# fallback-only per D-12).
+#
+# This host uses NetworkManager to write /etc/resolv.conf directly (verified:
+# a regular file, not a systemd-resolved symlink). NetworkManager's own DNS
+# management is disabled (`dns=none`) so it never overwrites the 127.0.0.1
+# nameserver line this role sets.
+
+- name: Ensure dnsmasq is installed
+  become: true
+  ansible.builtin.package:
+    name: dnsmasq
+    state: present
+
+- name: Ensure /etc/dnsmasq.d exists
+  become: true
+  ansible.builtin.file:
+    path: /etc/dnsmasq.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render athena.net wildcard directives
+  become: true
+  ansible.builtin.template:
+    src: athena-wildcards.conf.j2
+    dest: /etc/dnsmasq.d/athena-wildcards.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart dnsmasq
+
+- name: Ensure dnsmasq.conf includes conf-dir for /etc/dnsmasq.d
+  become: true
+  ansible.builtin.lineinfile:
+    path: /etc/dnsmasq.conf
+    regexp: '^#?conf-dir='
+    line: "conf-dir=/etc/dnsmasq.d/,*.conf"
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart dnsmasq
+
+- name: Bind dnsmasq to loopback only (never expose local DNS to the LAN)
+  become: true
+  ansible.builtin.lineinfile:
+    path: /etc/dnsmasq.conf
+    regexp: '^#?listen-address='
+    line: "listen-address=127.0.0.1"
+  notify: Restart dnsmasq
+
+- name: Restrict dnsmasq to the interfaces it explicitly binds
+  become: true
+  ansible.builtin.lineinfile:
+    path: /etc/dnsmasq.conf
+    regexp: '^#?bind-interfaces'
+    line: "bind-interfaces"
+  notify: Restart dnsmasq
+
+- name: Do not let dnsmasq read /etc/resolv.conf for upstream servers
+  become: true
+  ansible.builtin.lineinfile:
+    path: /etc/dnsmasq.conf
+    regexp: '^#?no-resolv'
+    line: "no-resolv"
+  notify: Restart dnsmasq
+
+- name: Configure explicit upstream resolvers for everything outside the athena domain fiction
+  become: true
+  ansible.builtin.blockinfile:
+    path: /etc/dnsmasq.conf
+    marker: "# {mark} ANSIBLE MANAGED BLOCK — athena upstream resolvers"
+    block: |
+      server=1.1.1.1
+      server=8.8.8.8
+  notify: Restart dnsmasq
+
+- name: Enable and start dnsmasq
+  become: true
+  ansible.builtin.systemd:
+    name: dnsmasq
+    enabled: true
+    state: started
+
+- name: Disable NetworkManager's own DNS management so it never overwrites 127.0.0.1
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/NetworkManager/conf.d/athena-no-dns.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by the bootstrap-dns Ansible role (Plan 01, Task 2; D-12).
+      # Prevents NetworkManager from overwriting /etc/resolv.conf's
+      # nameserver line, which this role points at the local dnsmasq
+      # instance so *.athena.net / *.platform.athena.net resolve without
+      # a per-subdomain /etc/hosts entry.
+      [main]
+      dns=none
+  register: athena_nm_dns_conf
+
+- name: Restart NetworkManager to apply dns=none
+  become: true
+  ansible.builtin.systemd:
+    name: NetworkManager
+    state: restarted
+  when: athena_nm_dns_conf.changed
+
+- name: Point the host resolver at the local dnsmasq instance
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/resolv.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by the bootstrap-dns Ansible role (Plan 01, Task 2; D-12).
+      # NetworkManager's own DNS management is disabled (see
+      # /etc/NetworkManager/conf.d/athena-no-dns.conf) specifically so it
+      # never overwrites this file. dnsmasq forwards everything outside
+      # *.athena.net / *.platform.athena.net to the upstream resolvers
+      # configured in /etc/dnsmasq.conf (no-resolv + explicit server= lines).
+      nameserver 127.0.0.1

@@ -1,0 +1,18 @@
+# mkcert-clusterissuer.yaml — cert-manager CA ClusterIssuer backed by the
+# mkcert root CA (Plan 01, Task 2; CONTEXT.md D-13).
+#
+# Applied independently on every cluster (app now, platform in Plan 02) —
+# each cluster has its own cert-manager install and must get its own
+# ClusterIssuer object, even though both share the same underlying CA
+# material (RESEARCH.md Anti-Patterns: "not shared state").
+#
+# `spec.ca.secretName` must already exist in the `cert-manager` namespace —
+# scripts/install-cluster-platform.sh creates it (`mkcert-ca-key-pair`,
+# read live from the host's `mkcert -CAROOT`, never committed to git).
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: mkcert-issuer
+spec:
+  ca:
+    secretName: mkcert-ca-key-pair

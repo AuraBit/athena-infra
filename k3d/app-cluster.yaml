@@ -1,0 +1,59 @@
+# app-cluster.yaml — declarative k3d config for the "app" cluster (Plan 01, Task 2).
+#
+# Shape is fixed by CONTEXT.md D-14 (EKS-faithful multi-node topology): 1 server
+# (control-plane stand-in, tainted so no workload ever lands on it, mimicking
+# EKS's invisible managed control plane) + 3 agents (actual workload capacity).
+#
+# k3s image pin: rancher/k3s:v1.35.5-k3s1 — Kubernetes 1.35, which is on Amazon
+# EKS's *standard support* list (1.33-1.36 as of this plan's execution; verified
+# directly against docs.aws.amazon.com/eks/latest/userguide/kubernetes-versions-standard.html).
+# This is also k3d v5.9.0's own default image on this host (confirmed via
+# `k3d version` before this file was written), so no extra image pull is needed
+# beyond what Task 1's toolchain already primed. Per D-14: do NOT default to
+# k3s's newest without checking the EKS-supported list first — this pin is the
+# result of that check, not an assumption.
+#
+# --disable=traefik and --node-taint MUST be applied in the same create
+# invocation (RESEARCH.md Pitfall 1): k3s's bundled Traefik install job has no
+# toleration for the CriticalAddonsOnly taint, so tainting an already-running
+# cluster with Traefik still enabled hangs forever waiting on an unschedulable
+# pod. D-11 disables the bundled Traefik anyway (Envoy Gateway is the Gateway
+# API implementation on both clusters).
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: app
+servers: 1
+agents: 3
+image: rancher/k3s:v1.35.5-k3s1
+ports:
+  # Loopback-scoped :443 binding (D-12): dnsmasq resolves *.athena.net to this
+  # exact loopback address, so the app cluster gets a clean https://<host>
+  # URL with no port number, and the platform cluster (Plan 02) gets its own
+  # dedicated loopback (127.0.0.2) with no port collision.
+  - port: 127.0.0.1:443:443
+    nodeFilters:
+      - loadbalancer
+options:
+  k3s:
+    extraArgs:
+      - arg: "--disable=traefik"
+        nodeFilters: ["server:*"]
+      - arg: "--node-taint=CriticalAddonsOnly=true:NoExecute"
+        nodeFilters: ["server:*"]
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    # Never silently repoint the operator's current kube-context just because
+    # a cluster was created — this host already has unrelated contexts in use.
+    switchCurrentContext: false
+registries:
+  create:
+    # FOUND-03: local container registry shared across both clusters and CI.
+    # Plan 02 attaches the platform cluster to this same registry via
+    # `registries.use` and empirically records whether hostPort accepted a
+    # loopback-scoped bind (RESEARCH.md Open Question 3) — left at the
+    # registries.create default (0.0.0.0) here since FOUND-03 only requires
+    # reachability, not a clean-URL story (that's specific to *.athena.net).
+    name: athena-registry
+    host: "0.0.0.0"
+    hostPort: "5000"

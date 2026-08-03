@@ -1,0 +1,12 @@
+---
+# dns.yml — applies the bootstrap-dns role (wildcard *.athena.net /
+# *.platform.athena.net DNS via dnsmasq, D-12). Localhost-only, run
+# imperatively during host bootstrap.
+#
+# Usage: ansible-playbook ansible/dns.yml
+- name: Bootstrap local wildcard DNS for the athena.net domain fiction
+  hosts: localhost
+  connection: local
+  become: true
+  roles:
+    - bootstrap-dns
