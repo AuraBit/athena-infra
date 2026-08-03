@@ -1,0 +1,48 @@
+# .actrc — committed act configuration for this estate's fast inner loop
+# (Plan 06, Task 3; FOUND-05). Committed rather than left to individual
+# shell history so every run against this repo behaves the same way,
+# locally or for anyone else who clones it.
+#
+# The two commands the inner loop actually uses day to day:
+#   act -l -W .github/workflows/lint.yml        # list the jobs a workflow declares
+#   act push -W .github/workflows/lint.yml       # run the lint workflow's push-triggered jobs
+#
+# See docs/runbooks/runner-ops.md's "What act does not prove" section before
+# treating a green act run as equivalent to a green run on the real
+# self-hosted runner — it deliberately is not.
+
+# Medium runner image tier (~500MB) for every `runs-on: ubuntu-latest` job —
+# the best coverage-to-size tradeoff for this estate's workloads (Docker
+# BuildKit, Go builds, Terraform) per CLAUDE.md's own stack decision. The
+# micro image (node:16-buster-slim) lacks Terraform/most CLI tooling
+# entirely; the large image (catthehacker/ubuntu:full-latest, ~18GB) buys
+# closer GitHub-hosted-runner parity than this estate's lint-tier workflows
+# need, at a multi-gigabyte pull cost every image update.
+#
+# Live finding, this plan: the stock medium image does not ship `ruby`,
+# which athena-infra/athena-gitops's lint.yml jobs depend on for their YAML
+# syntax check (real GitHub-hosted ubuntu-latest runners ship it; act's
+# medium tier deliberately does not — see runner-ops.md's "What act does
+# not prove"). Rather than moving every repo to the ~18GB large tier just
+# to gain one interpreter, `athena/act-ubuntu-latest:act-latest` layers
+# `ruby` onto the stock medium image (verify-runner.sh builds it if
+# missing) — same size class, this repo's actual dependency closed.
+-P ubuntu-latest=athena/act-ubuntu-latest:act-latest
+
+# Match this host's actual architecture explicitly rather than relying on
+# act's own auto-detection, which on some hosts silently falls back to
+# emulation (slow, and can mask an image that doesn't exist for the host's
+# real arch).
+--container-architecture linux/amd64
+
+# athena/act-ubuntu-latest:act-latest above is a local-only tag (never
+# pushed to any registry) — without this, act's default forced pull would
+# fail with "pull access denied" trying to fetch it from Docker Hub instead
+# of using the image already built on this host.
+--pull=false
+
+# Explicit, repo-local artifact/cache paths rather than act's own
+# system-temp defaults, so repeated runs are easy to find and clean up, and
+# so this repo's inner loop never leaves state outside its own tree.
+--artifact-server-path .act-artifacts
+--cache-server-path .act-cache
