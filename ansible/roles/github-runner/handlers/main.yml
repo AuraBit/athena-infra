@@ -1,14 +1,17 @@
 ---
-# Handlers for the github-runner role (Plan 06, Task 1). Mirrors
-# bootstrap-dns/bootstrap-localstack's handler shape: notified only when the
-# rendered systemd unit or the JIT script's content actually changes
-# (e.g. a future pinned-version bump, a label-list change, or an edit to
-# jitconfig.sh.j2 itself) — a restart here interrupts at most the runner's
-# current idle-listening state, never a job in progress, since GitHub's own
-# ephemeral lifecycle already tears the unit down between jobs.
-- name: Restart athena-runner unit
+# Handlers for the github-runner role (Plan 06, Task 1; pooled by Plan 02-02
+# Task 3, D-12). Mirrors bootstrap-dns/bootstrap-localstack's handler shape:
+# notified only when the rendered systemd unit or the JIT script's content
+# actually changes (e.g. a future pinned-version bump, a label-list change,
+# or an edit to jitconfig.sh.j2 itself) — a restart here interrupts at most
+# each instance's current idle-listening state, never a job in progress,
+# since GitHub's own ephemeral lifecycle already tears each instance down
+# between jobs. Every pool instance is restarted, since jitconfig.sh.j2 and
+# the template unit are shared across all of them.
+- name: Restart athena-runner pool
   become: true
   ansible.builtin.systemd_service:
-    name: athena-runner
+    name: "athena-runner@{{ item }}"
     daemon_reload: true
     state: restarted
+  loop: "{{ range(1, athena_runner_pool_size + 1) | list }}"

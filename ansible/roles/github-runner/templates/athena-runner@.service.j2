@@ -1,6 +1,14 @@
 # {{ ansible_managed }}
-# athena-runner.service — Athena ephemeral GitHub Actions self-hosted runner
-# (Plan 06, Task 1; CONTEXT.md D-16/D-17, RESEARCH.md Pattern 4).
+# athena-runner@.service — Athena ephemeral GitHub Actions self-hosted
+# runner, systemd TEMPLATE unit (Plan 06 Task 1; CONTEXT.md D-16/D-17,
+# RESEARCH.md Pattern 4 — pooled into N instances by Plan 02-02 Task 3,
+# D-12). `%i` is the systemd instance name (1, 2, ... up to
+# athena_runner_pool_size) — every instance runs this exact unit body with
+# its own isolated runtime directory, work folder, and registered runner
+# name, so a PR plan job and a `main` apply job never queue behind one
+# another purely on runner-capacity grounds (that queuing must come from
+# Terraform's state lock, per IAC-03's drill, not from having only one
+# runner).
 #
 # One pristine runner per job: `--jitconfig` implies `--ephemeral`, so
 # GitHub deregisters this runner the moment it finishes exactly one job and
@@ -12,7 +20,7 @@
 # estate repository ({{ athena_runner_pat_file }}) and only jitconfig.sh
 # reads it, at runtime, per start.
 [Unit]
-Description=Athena ephemeral GitHub Actions self-hosted runner (org-registered, JIT config per start)
+Description=Athena ephemeral GitHub Actions self-hosted runner instance %i (org-registered, JIT config per start)
 Documentation=https://docs.github.com/actions/hosting-your-own-runners
 After=network-online.target docker.service
 Wants=network-online.target
@@ -35,18 +43,22 @@ WorkingDirectory={{ athena_runner_home }}
 # without needing a post-hoc chmod race.
 UMask=0077
 
-# RuntimeDirectory lives at /run/athena-runner and is created fresh
-# (and wiped) by systemd on every unit start/stop — this is where the
-# single-use JIT config lands, so it never outlives the job it was fetched
-# for (T-01-32: cross-job filesystem contamination mitigation).
-RuntimeDirectory=athena-runner
+# RuntimeDirectory lives at /run/athena-runner-%i and is created fresh
+# (and wiped) by systemd on every unit start/stop — this is where this
+# instance's single-use JIT config lands, so it never outlives the job it
+# was fetched for (T-01-32: cross-job filesystem contamination mitigation)
+# and never collides with a sibling instance's own runtime directory.
+RuntimeDirectory=athena-runner-%i
 RuntimeDirectoryMode=0700
 
 # Belt-and-braces pristine-per-job guarantee beyond what RuntimeDirectory
 # alone covers: also clear any leftover _work contents from a previous job
-# before the next one starts.
-ExecStartPre=/usr/bin/rm -rf {{ athena_runner_home }}/{{ athena_runner_work_folder }}
-ExecStartPre={{ athena_runner_home }}/jitconfig.sh
+# before the next one starts. Each instance gets its own work folder
+# ({{ athena_runner_work_folder }}-%i) so two concurrent jobs on different
+# pool instances cannot contaminate each other's checkout — the existing
+# pristine-per-job guarantee has to hold per instance, not just globally.
+ExecStartPre=/usr/bin/rm -rf {{ athena_runner_home }}/{{ athena_runner_work_folder }}-%i
+ExecStartPre={{ athena_runner_home }}/jitconfig.sh %i
 ExecStart=/usr/bin/bash -c '"{{ athena_runner_home }}/run.sh" --jitconfig "$(cat ${RUNTIME_DIRECTORY}/jitconfig.json)"'
 
 Restart=always

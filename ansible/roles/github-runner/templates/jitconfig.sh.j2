@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 # {{ ansible_managed }}
 # jitconfig.sh — rendered into {{ athena_runner_home }} by the github-runner
-# Ansible role (Plan 06, Task 1; CONTEXT.md D-16, RESEARCH.md Pattern 4).
+# Ansible role (Plan 06, Task 1; CONTEXT.md D-16, RESEARCH.md Pattern 4 —
+# pooled into N instances by Plan 02-02 Task 3, D-12).
 #
-# Runs as athena-runner.service's ExecStartPre, once per unit start — i.e.
+# Runs as athena-runner@%i.service's ExecStartPre, once per unit start — i.e.
 # once per job, since the unit's Restart=always loop invokes this again
 # every time the runner process exits after completing (or failing) exactly
 # one job. Its ONLY job: exchange the long-lived registration PAT for a
 # single-use, ~1-hour-lived JIT configuration, and write THAT to a private
 # runtime file the runner process then consumes.
+#
+# Takes the systemd instance name (%i) as $1 and derives this instance's own
+# registered runner name from it ({{ athena_runner_name_prefix }}-<instance>)
+# and its own work folder ({{ athena_runner_work_folder }}-<instance>), so
+# two pool instances never collide on either the registration name or the
+# on-disk checkout path.
 #
 # Two rules this script enforces, not just documents:
 #   1. The PAT ({{ athena_runner_pat_file }}) is used ONLY to call
@@ -23,13 +30,15 @@
 
 set -euo pipefail
 
+INSTANCE="${1:?jitconfig.sh: missing systemd instance name argument (%i)}"
+
 PAT_FILE="{{ athena_runner_pat_file }}"
 ORG="{{ athena_runner_org }}"
-RUNNER_NAME="{{ athena_runner_name }}"
+RUNNER_NAME="{{ athena_runner_name_prefix }}-${INSTANCE}"
 RUNNER_GROUP_ID={{ athena_runner_group_id }}
-WORK_FOLDER="{{ athena_runner_work_folder }}"
+WORK_FOLDER="{{ athena_runner_work_folder }}-${INSTANCE}"
 LABELS='{{ athena_runner_labels | to_json }}'
-RUNTIME_DIR="${RUNTIME_DIRECTORY:-/run/athena-runner}"
+RUNTIME_DIR="${RUNTIME_DIRECTORY:-/run/athena-runner-${INSTANCE}}"
 OUT_FILE="${RUNTIME_DIR}/jitconfig.json"
 
 if [ ! -r "${PAT_FILE}" ]; then

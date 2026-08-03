@@ -321,6 +321,8 @@
 
 # ---------------------------------------------------------------------------
 # 4. jitconfig.sh — the per-start credential fetch (RESEARCH.md Pattern 4).
+#    Shared by every pool instance; the instance name is passed as an
+#    ExecStartPre argument (%i), not baked into the rendered script.
 # ---------------------------------------------------------------------------
 - name: Render jitconfig.sh into the runner home
   become: true
@@ -330,39 +332,73 @@
     owner: "{{ athena_runner_user }}"
     group: "{{ athena_runner_user }}"
     mode: "0750"
-  notify: Restart athena-runner unit
+  notify: Restart athena-runner pool
 
 # ---------------------------------------------------------------------------
-# 5. systemd unit — ExecStartPre JIT fetch, Restart=always restart loop.
+# 5. systemd template unit — ExecStartPre JIT fetch, Restart=always restart
+#    loop, one instance per pool slot (D-12, Plan 02-02 Task 3).
 # ---------------------------------------------------------------------------
-- name: Render the athena-runner systemd unit
+- name: Render the athena-runner@ systemd template unit
   become: true
   ansible.builtin.template:
-    src: athena-runner.service.j2
-    dest: /etc/systemd/system/athena-runner.service
+    src: "athena-runner@.service.j2"
+    dest: /etc/systemd/system/athena-runner@.service
     owner: root
     group: root
     mode: "0644"
-  notify: Restart athena-runner unit
+  notify: Restart athena-runner pool
 
-- name: Reload systemd, enable and start athena-runner
+# Retire the pre-pool single unit (Plan 06's athena-runner.service) so the
+# host never runs it alongside the templated pool — an administrator who
+# skips this step would otherwise have three registered runners (the old
+# singleton plus the two new pool instances) instead of two.
+- name: Check whether the retired single-unit service file still exists
+  ansible.builtin.stat:
+    path: /etc/systemd/system/athena-runner.service
+  register: athena_runner_legacy_unit
+
+- name: Stop and disable the retired single athena-runner unit, if present
   become: true
   ansible.builtin.systemd_service:
-    name: athena-runner
+    name: athena-runner.service
+    state: stopped
+    enabled: false
+  when: athena_runner_legacy_unit.stat.exists
+  failed_when: false
+
+- name: Delete the retired single athena-runner unit file
+  become: true
+  ansible.builtin.file:
+    path: /etc/systemd/system/athena-runner.service
+    state: absent
+  register: athena_runner_legacy_unit_removed
+
+- name: Reload systemd after removing the retired unit
+  become: true
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: athena_runner_legacy_unit_removed.changed
+
+- name: Reload systemd, enable and start every pool instance
+  become: true
+  ansible.builtin.systemd_service:
+    name: "athena-runner@{{ item }}"
     daemon_reload: true
     enabled: true
     state: started
+  loop: "{{ range(1, athena_runner_pool_size + 1) | list }}"
 
 # ---------------------------------------------------------------------------
-# 6. Wait for the organisation to report an online runner with the
-#    configured label — proves the whole chain worked end to end, not just
-#    that the systemd unit reports "active". Reads GH_RUNNER_REG_PAT from
-#    the ansible-playbook process's own environment (sourced from
+# 6. Wait for the organisation to report at least athena_runner_pool_size
+#    online runners with the configured label — proves the whole chain
+#    worked end to end for every pool instance, not just that the systemd
+#    units report "active". Reads GH_RUNNER_REG_PAT from the
+#    ansible-playbook process's own environment (sourced from
 #    .governance.env by the caller before invoking this playbook, same
 #    convention as governance/imports.sh's TF_VAR_github_token) rather than
 #    an Ansible variable, so the token never appears in a play recap.
 # ---------------------------------------------------------------------------
-- name: Wait for the organisation to report an online runner carrying the estate label
+- name: Wait for the organisation to report the full pool online carrying the estate label
   ansible.builtin.shell:
     cmd: >-
       curl -sS -H "Authorization: Bearer ${GH_RUNNER_REG_PAT}"
@@ -372,6 +408,6 @@
   register: athena_runner_online_count
   changed_when: false
   no_log: true
-  until: athena_runner_online_count.stdout | trim | int >= 1
+  until: athena_runner_online_count.stdout | trim | int >= athena_runner_pool_size
   retries: 24
   delay: 5
