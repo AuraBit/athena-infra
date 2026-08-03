@@ -1,0 +1,35 @@
+# Terraform local state and backups (governance stack — D-10 keeps this state
+# local and out of git, deliberately unlike the Phase 2+ AWS stacks whose state
+# lives in LocalStack S3).
+governance/**/terraform.tfstate
+governance/**/terraform.tfstate.*
+governance/**/*.tfstate
+governance/**/*.tfstate.backup
+
+# Terraform lock/plan/crash artifacts and working directories, everywhere in
+# this repo (governance stack today; Phase 2/6 AWS stacks later).
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfplan
+*.tfplan.json
+crash.log
+crash.*.log
+*.auto.tfvars
+*.auto.tfvars.json
+
+# LocalStack auth token / env file (D-15) — never committed.
+localstack/.localstack.env
+
+# Any raw key material. The mkcert root CA private key in particular must
+# never leave the host CAROOT directory — see the plan's threat model (T-01-01).
+*.pem
+*.key
+!**/templates/*.pem.j2
+!**/templates/*.key.j2
+
+# Runner / CI scratch space (Plan 06).
+_work/
+
+# Editor/OS noise.
+.DS_Store
+*.swp
