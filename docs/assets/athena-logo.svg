@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240" role="img" aria-label="Athena logo — a geometric owl inside a hexagon">
+  <defs>
+    <linearGradient id="athena-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f46e5"/>
+      <stop offset="1" stop-color="#7c3aed"/>
+    </linearGradient>
+  </defs>
+
+  <!-- outer hexagon -->
+  <path d="M120 10 L215 65 L215 175 L120 230 L25 175 L25 65 Z" fill="url(#athena-bg)"/>
+
+  <!-- inner hexagon accent line -->
+  <path d="M120 28 L199 74 L199 166 L120 212 L41 166 L41 74 Z"
+        fill="none" stroke="#ffffff" stroke-opacity="0.22" stroke-width="3"/>
+
+  <!-- owl brow arc -->
+  <path d="M66 100 Q120 58 174 100"
+        fill="none" stroke="#ffffff" stroke-width="9" stroke-linecap="round"/>
+
+  <!-- ear tufts -->
+  <path d="M70 97 L62 76" stroke="#ffffff" stroke-width="9" stroke-linecap="round"/>
+  <path d="M170 97 L178 76" stroke="#ffffff" stroke-width="9" stroke-linecap="round"/>
+
+  <!-- eyes -->
+  <circle cx="90" cy="122" r="27" fill="#ffffff"/>
+  <circle cx="150" cy="122" r="27" fill="#ffffff"/>
+  <circle cx="90" cy="122" r="11" fill="#1e1b4b"/>
+  <circle cx="150" cy="122" r="11" fill="#1e1b4b"/>
+
+  <!-- beak -->
+  <path d="M120 138 L109 155 L120 172 L131 155 Z" fill="#fbbf24"/>
+
+  <!-- chest feathers: three chevrons -->
+  <path d="M100 186 L120 176 L140 186" fill="none" stroke="#ffffff" stroke-opacity="0.55" stroke-width="5" stroke-linecap="round"/>
+  <path d="M106 198 L120 191 L134 198" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="5" stroke-linecap="round"/>
+</svg>
