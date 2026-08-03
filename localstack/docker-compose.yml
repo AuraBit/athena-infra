@@ -10,15 +10,25 @@
 #
 # Reachability (D-15): the host, CI, and Terraform all reach this at
 # localhost:4566. Cluster pods reach it at host.k3d.internal:4566 — a
-# hostname k3d resolves to the host automatically, requiring no extra
-# networking config on this file's side.
+# hostname k3d resolves to the docker bridge network's gateway IP (not
+# 127.0.0.1) automatically. That means the published port cannot be
+# loopback-scoped the way the two clusters' own :443 Gateway ports are
+# (127.0.0.1/127.0.0.2): a 127.0.0.1-only bind answers the host but refuses
+# connections arriving from the k3d bridge network, which is exactly how
+# `host.k3d.internal` reaches it — confirmed live (curl from an in-cluster
+# pod got `connection refused` against a 127.0.0.1-only bind; 0.0.0.0 fixed
+# it). This mirrors Plan 01's identical registry decision (registries.create
+# left at its default 0.0.0.0 host binding for the same cross-cluster-
+# reachability reason) and is accepted by this plan's own threat model
+# (T-01-12: unauthenticated 4566 reachable from cluster pods, accepted at
+# ASVS L1 — the emulated account has no real credentials or data behind it).
 services:
   localstack:
     image: localstack/localstack:2026.07.1
     container_name: athena-localstack
     restart: unless-stopped
     ports:
-      - "127.0.0.1:4566:4566"
+      - "0.0.0.0:4566:4566"
     environment:
       - DEBUG=0
       # Persisted here (not hardcoded) so a compose-level default can never
