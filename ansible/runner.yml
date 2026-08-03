@@ -1,0 +1,21 @@
+---
+# runner.yml — applies the github-runner role (ephemeral, org-registered,
+# JIT-config self-hosted GitHub Actions runner, D-16/D-17). Localhost-only,
+# mirrors dns.yml/localstack.yml's shape.
+#
+# Precondition: the registration PAT file
+# (roles/github-runner/defaults/main.yml's athena_runner_pat_file) must
+# already exist as a root-readable file outside every estate repository —
+# see tasks/main.yml's loud failure message for the exact user_setup step
+# if it does not. GH_RUNNER_REG_PAT must also be exported in this shell
+# (e.g. `set -a; . .governance.env; set +a`) so the role's final
+# online-runner check can query the organisation's runners API.
+#
+# Usage: ansible-galaxy collection install -r ansible/requirements.yml
+#        ansible-playbook ansible/runner.yml
+- name: Provision the ephemeral self-hosted GitHub Actions runner
+  hosts: localhost
+  connection: local
+  become: false
+  roles:
+    - github-runner

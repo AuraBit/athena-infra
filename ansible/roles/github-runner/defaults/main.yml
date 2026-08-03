@@ -1,0 +1,68 @@
+---
+# defaults/main.yml — github-runner role knobs (Plan 06, Task 1; CONTEXT.md
+# D-16/D-17). Every value that could plausibly change across a re-run or a
+# future estate expansion is a variable here, not a literal buried in
+# tasks/main.yml or the templates — this role is "the substance" of
+# Ansible's one scoped role in this estate (D-16), kept production-shaped.
+
+# ---------------------------------------------------------------------------
+# GitHub Actions runner binary — pinned explicitly (RESEARCH.md T-01-04:
+# never track "latest"). The actions/runner GitHub Releases page publishes
+# no separate .sha256 asset for this tarball; the authoritative per-release
+# checksum source is GET /orgs/{org}/actions/runners/downloads (requires a
+# manage_runners-scoped token), fetched live at plan-execution time and
+# independently re-verified with sha256sum against the downloaded artifact
+# before this role was written.
+# ---------------------------------------------------------------------------
+athena_runner_version: "2.336.0"
+athena_runner_download_url: "https://github.com/actions/runner/releases/download/v{{ athena_runner_version }}/actions-runner-linux-x64-{{ athena_runner_version }}.tar.gz"
+athena_runner_checksum_sha256: "04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d"
+
+# ---------------------------------------------------------------------------
+# Organisation-level registration
+# ---------------------------------------------------------------------------
+athena_runner_org: "AuraBit"
+athena_runner_name: "athena-runner-01"
+
+# The estate-specific label alongside the three standard ones. Phases 2, 3,
+# and 7 target this exact list in their `runs-on:` — see
+# heavy-selfhosted.yml (Task 2) and docs/runbooks/runner-ops.md (Task 3).
+athena_runner_labels:
+  - self-hosted
+  - linux
+  - x64
+  - athena-local
+
+# Runner group scoped to selected repositories only (D-08: "self-hosted
+# runner scoped to selected repos"). GitHub's Default group (id 1) ships
+# with allows_public_repositories=false and visibility=all — every repo in
+# this estate is public, so the Default group would either silently refuse
+# jobs from all of them (allows_public_repositories=false, as verified live
+# against this org before this role was written) or, if opened up, expose
+# the runner to every repo in the org rather than just the one that
+# actually uses it. A dedicated "athena-selfhosted" runner group (id 3) was
+# created for this plan via a live API call (the Terraform GitHub provider
+# does not manage runner groups — see docs/runbooks/github-bootstrap.md's
+# provider-coverage-gaps section), scoped via visibility=selected to
+# athena-infra only (the sole repo whose workflows target self-hosted
+# today), with allows_public_repositories explicitly enabled since
+# athena-infra is public. See docs/runbooks/runner-ops.md's Blast radius
+# section for the full reasoning.
+athena_runner_group_id: 3
+athena_runner_group_name: "athena-selfhosted"
+
+# ---------------------------------------------------------------------------
+# Local OS user & filesystem layout
+# ---------------------------------------------------------------------------
+athena_runner_user: "athena-runner"
+athena_runner_home: "/home/athena-runner"
+athena_runner_work_folder: "_work"
+
+# ---------------------------------------------------------------------------
+# Registration credential — root-readable, outside every estate repository
+# (user_setup). This role only ASSERTS this file's presence/shape and
+# tightens its group ownership so the runner user can read it at runtime;
+# it never reads the PAT's contents into an Ansible variable (no_log
+# throughout tasks/main.yml's assertions).
+# ---------------------------------------------------------------------------
+athena_runner_pat_file: "/etc/athena-runner/github-runner-pat"

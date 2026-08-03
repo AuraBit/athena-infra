@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# jitconfig.sh — rendered into {{ athena_runner_home }} by the github-runner
+# Ansible role (Plan 06, Task 1; CONTEXT.md D-16, RESEARCH.md Pattern 4).
+#
+# Runs as athena-runner.service's ExecStartPre, once per unit start — i.e.
+# once per job, since the unit's Restart=always loop invokes this again
+# every time the runner process exits after completing (or failing) exactly
+# one job. Its ONLY job: exchange the long-lived registration PAT for a
+# single-use, ~1-hour-lived JIT configuration, and write THAT to a private
+# runtime file the runner process then consumes.
+#
+# Two rules this script enforces, not just documents:
+#   1. The PAT ({{ athena_runner_pat_file }}) is used ONLY to call
+#      generate-jitconfig. It is never the runner's own authentication
+#      credential and is never written anywhere else, logged, or echoed.
+#   2. The fetched JIT config is single-use and short-lived by GitHub's own
+#      design — it is generated immediately before every start, never
+#      cached, never reused across restarts.
+#
+# Fails loudly (non-zero) on any error so a broken fetch stops the systemd
+# unit rather than silently starting an unregistered/misconfigured runner.
+
+set -euo pipefail
+
+PAT_FILE="{{ athena_runner_pat_file }}"
+ORG="{{ athena_runner_org }}"
+RUNNER_NAME="{{ athena_runner_name }}"
+RUNNER_GROUP_ID={{ athena_runner_group_id }}
+WORK_FOLDER="{{ athena_runner_work_folder }}"
+LABELS='{{ athena_runner_labels | to_json }}'
+RUNTIME_DIR="${RUNTIME_DIRECTORY:-/run/athena-runner}"
+OUT_FILE="${RUNTIME_DIR}/jitconfig.json"
+
+if [ ! -r "${PAT_FILE}" ]; then
+  echo "jitconfig: cannot read PAT file ${PAT_FILE}" >&2
+  exit 1
+fi
+
+PAT="$(cat "${PAT_FILE}")"
+
+# Deregister any stale same-name runner first (live finding, this plan):
+# GitHub only auto-deregisters an ephemeral runner after it completes a job.
+# An administrative restart (e.g. this Ansible role re-rendering the unit
+# and notifying its handler) kills a not-yet-jobbed runner process without
+# ever giving it the chance to deregister itself, leaving a stale "online"
+# registration under this name — and generate-jitconfig then refuses with
+# "Already exists" for as long as that stale entry lingers. Looking the
+# name up and deleting it first makes every start idempotent regardless of
+# why the previous instance went away (job completion, restart, crash).
+STALE_ID="$(curl -sS -H "Authorization: Bearer ${PAT}" \
+  -H "Accept: application/vnd.github+json" \
+  -H "X-GitHub-Api-Version: 2022-11-28" \
+  "https://api.github.com/orgs/${ORG}/actions/runners?per_page=100" \
+  | python3 -c 'import json,sys
+try:
+    d = json.load(sys.stdin)
+    for r in d.get("runners", []):
+        if r.get("name") == sys.argv[1]:
+            print(r["id"])
+            break
+except Exception:
+    pass' "${RUNNER_NAME}")"
+
+if [ -n "${STALE_ID}" ]; then
+  echo "jitconfig: removing stale registration ${RUNNER_NAME} (id ${STALE_ID}) before re-registering"
+  curl -sS -X DELETE -H "Authorization: Bearer ${PAT}" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "https://api.github.com/orgs/${ORG}/actions/runners/${STALE_ID}" >/dev/null
+fi
+
+RESPONSE="$(curl -sS -X POST \
+  -H "Authorization: Bearer ${PAT}" \
+  -H "Accept: application/vnd.github+json" \
+  -H "X-GitHub-Api-Version: 2022-11-28" \
+  "https://api.github.com/orgs/${ORG}/actions/runners/generate-jitconfig" \
+  -d "{\"name\":\"${RUNNER_NAME}\",\"runner_group_id\":${RUNNER_GROUP_ID},\"labels\":${LABELS},\"work_folder\":\"${WORK_FOLDER}\"}")"
+
+# The PAT itself is never used again after this point in the script.
+unset PAT
+
+ENCODED_CONFIG="$(printf '%s' "${RESPONSE}" | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("encoded_jit_config", ""))
+except Exception:
+    print("")')"
+
+if [ -z "${ENCODED_CONFIG}" ]; then
+  ERR_MSG="$(printf '%s' "${RESPONSE}" | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("message", "<no message field>"))
+except Exception:
+    print("<unparseable response>")')"
+  echo "jitconfig: response carried no encoded_jit_config — refusing to start an unregistered runner." >&2
+  echo "jitconfig: GitHub API said: ${ERR_MSG}" >&2
+  exit 1
+fi
+
+umask 077
+mkdir -p "${RUNTIME_DIR}"
+printf '%s' "${ENCODED_CONFIG}" > "${OUT_FILE}"
+chmod 0600 "${OUT_FILE}"
+unset ENCODED_CONFIG RESPONSE
+
+echo "jitconfig: fetched single-use configuration for ${RUNNER_NAME} (org ${ORG}, group {{ athena_runner_group_name }}), written to ${OUT_FILE}"

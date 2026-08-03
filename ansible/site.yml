@@ -1,0 +1,30 @@
+---
+# site.yml — the aggregator playbook (Plan 06, Task 1). Imports all three
+# host-bootstrap playbooks in dependency order:
+#
+#   1. DNS first        — everything else in this estate is addressed by
+#                          name (*.athena.net / *.platform.athena.net), so
+#                          resolution must exist before anything that
+#                          reaches those names is exercised.
+#   2. LocalStack second — CI/Terraform target the emulated AWS account; it
+#                          must be up before anything that calls it runs.
+#   3. Runner last       — it is the consumer of both: its jobs resolve
+#                          athena.net names and call LocalStack/the local
+#                          registry, so it comes online only after its two
+#                          dependencies are ready.
+#
+# A single `ansible-playbook ansible/site.yml` run provisions the whole
+# host-level foundation and is idempotent — a second consecutive run
+# reports changed=0 across all three imported playbooks.
+#
+# Usage: ansible-galaxy collection install -r ansible/requirements.yml
+#        set -a; . .governance.env; set +a   (runner.yml's online-runner check needs GH_RUNNER_REG_PAT)
+#        ansible-playbook ansible/site.yml
+- name: "Site: DNS (dependency-first — everything else is addressed by name)"
+  import_playbook: dns.yml
+
+- name: "Site: LocalStack (dependency-second — CI/Terraform target the emulated AWS account)"
+  import_playbook: localstack.yml
+
+- name: "Site: GitHub Actions runner (dependency-last — consumes both DNS and LocalStack)"
+  import_playbook: runner.yml
