@@ -63,3 +63,15 @@ output "private_data_route_table_ids" {
   description = "IDs of the private-data route tables, one per AZ. None of these carry a 0.0.0.0/0 route — that absence is the tier's whole purpose."
   value       = [for az, rt in aws_route_table.private_data : rt.id]
 }
+
+# --- Plan 02-03, Task 3: S3 gateway VPC endpoint ----------------------------
+
+output "s3_vpc_endpoint_id" {
+  description = "ID of the S3 gateway VPC endpoint attached to every private route table (private-app and private-data)."
+  value       = aws_vpc_endpoint.s3.id
+}
+
+output "s3_vpc_endpoint_prefix_list_id" {
+  description = "AWS-managed prefix list id the S3 gateway endpoint injects a route for into its attached route tables."
+  value       = aws_vpc_endpoint.s3.prefix_list_id
+}
