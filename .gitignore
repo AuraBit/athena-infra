@@ -16,6 +16,7 @@ crash.log
 crash.*.log
 *.auto.tfvars
 *.auto.tfvars.json
+governance/terraform.tfvars
 
 # LocalStack auth token / env file (D-15) — never committed.
 localstack/.localstack.env
