@@ -231,6 +231,102 @@ else
         fi
       done
     fi
+
+    # -------------------------------------------------------------------
+    # Internet gateway, NAT egress, per-tier routes (Plan 02-03, Task 2).
+    # -------------------------------------------------------------------
+    IGW_ID="$(printf '%s' "${OUTPUT_JSON}" | jq -r '.internet_gateway_id.value // empty' 2>/dev/null)"
+    if [ -z "${IGW_ID}" ]; then
+      check "${env_name}: internet_gateway_id output is present" 1 \
+        "terraform output -json has no .internet_gateway_id.value key"
+    else
+      IGW_DESCRIBE="$(aws_ls ec2 describe-internet-gateways --filters "Name=attachment.vpc-id,Values=${VPC_ID}" --output json)"
+      IGW_OBSERVED_ID="$(printf '%s' "${IGW_DESCRIBE}" | jq -r '.InternetGateways[0].InternetGatewayId // empty' 2>/dev/null)"
+      IGW_COUNT="$(printf '%s' "${IGW_DESCRIBE}" | jq -r '.InternetGateways | length' 2>/dev/null)"
+      if [ "${IGW_COUNT}" = "1" ] && [ "${IGW_OBSERVED_ID}" = "${IGW_ID}" ]; then
+        check "${env_name}: internet_gateway_id (${IGW_ID}) attached to ${VPC_ID}, confirmed via ec2 describe-internet-gateways" 0
+      else
+        check "${env_name}: internet_gateway_id attached to ${VPC_ID}" 1 \
+          "expected=[${IGW_ID}] observed_count=[${IGW_COUNT}] observed_id=[${IGW_OBSERVED_ID}]"
+      fi
+    fi
+
+    NAT_IDS_JSON="$(printf '%s' "${OUTPUT_JSON}" | jq -c '.nat_gateway_ids.value // []' 2>/dev/null)"
+    NAT_COUNT="$(printf '%s' "${NAT_IDS_JSON}" | jq 'length' 2>/dev/null)"
+    if [ -z "${NAT_COUNT}" ] || [ "${NAT_COUNT}" -eq 0 ] 2>/dev/null; then
+      check "${env_name}: nat_gateway_ids output is present and non-empty" 1 \
+        "terraform output -json has no non-empty .nat_gateway_ids.value"
+    else
+      NAT_IDS_SORTED="$(printf '%s' "${NAT_IDS_JSON}" | jq -r '.[]' 2>/dev/null | sort)"
+      NAT_IDS_SPACE="$(printf '%s' "${NAT_IDS_JSON}" | jq -r '.[]' 2>/dev/null | tr '\n' ' ')"
+
+      NAT_DESCRIBE="$(aws_ls ec2 describe-nat-gateways --filter "Name=vpc-id,Values=${VPC_ID}" --output json)"
+      NAT_OBSERVED_SORTED="$(printf '%s' "${NAT_DESCRIBE}" | jq -r '.NatGateways[].NatGatewayId' 2>/dev/null | sort)"
+
+      if [ -n "${NAT_OBSERVED_SORTED}" ] && [ "${NAT_IDS_SORTED}" = "${NAT_OBSERVED_SORTED}" ]; then
+        check "${env_name}: nat_gateway_ids set (${NAT_COUNT}) matches ec2 describe-nat-gateways, unordered" 0
+      else
+        check "${env_name}: nat_gateway_ids set matches ec2 describe-nat-gateways, unordered" 1 \
+          "expected=[${NAT_IDS_SORTED}] observed=[${NAT_OBSERVED_SORTED}]"
+      fi
+
+      NAT_NOT_AVAILABLE="$(printf '%s' "${NAT_DESCRIBE}" | jq -r '[.NatGateways[] | select(.State != "available") | .NatGatewayId] | join(",")' 2>/dev/null)"
+      if [ -z "${NAT_NOT_AVAILABLE}" ]; then
+        check "${env_name}: every NAT gateway (${NAT_COUNT}) reports state 'available'" 0
+      else
+        check "${env_name}: every NAT gateway reports state 'available'" 1 \
+          "not available: ${NAT_NOT_AVAILABLE}"
+      fi
+
+      # private-app route tables: each must carry exactly one 0.0.0.0/0
+      # route whose target is a NAT gateway id present in nat_gateway_ids.
+      APP_RT_IDS_JSON="$(printf '%s' "${OUTPUT_JSON}" | jq -c '.private_app_route_table_ids.value // []' 2>/dev/null)"
+      APP_RT_COUNT="$(printf '%s' "${APP_RT_IDS_JSON}" | jq 'length' 2>/dev/null)"
+      if [ -z "${APP_RT_COUNT}" ] || [ "${APP_RT_COUNT}" -eq 0 ] 2>/dev/null; then
+        check "${env_name}: private_app_route_table_ids output is present and non-empty" 1 \
+          "terraform output -json has no non-empty .private_app_route_table_ids.value"
+      else
+        APP_RT_MISMATCH=""
+        for rtid in $(printf '%s' "${APP_RT_IDS_JSON}" | jq -r '.[]' 2>/dev/null); do
+          RT_DESCRIBE="$(aws_ls ec2 describe-route-tables --route-table-ids "${rtid}" --output json)"
+          RT_NAT_TARGET="$(printf '%s' "${RT_DESCRIBE}" | jq -r --arg cidr "0.0.0.0/0" '.RouteTables[0].Routes[]? | select(.DestinationCidrBlock==$cidr) | .NatGatewayId // empty' 2>/dev/null)"
+          if [ -z "${RT_NAT_TARGET}" ] || ! printf '%s' "${NAT_IDS_SORTED}" | grep -Fxq "${RT_NAT_TARGET}"; then
+            APP_RT_MISMATCH="${APP_RT_MISMATCH} ${rtid}(nat_target=${RT_NAT_TARGET:-<none>})"
+          fi
+        done
+        if [ -z "${APP_RT_MISMATCH}" ]; then
+          check "${env_name}: every private-app route table (${APP_RT_COUNT}) has a 0.0.0.0/0 route to a known NAT gateway" 0
+        else
+          check "${env_name}: every private-app route table has a 0.0.0.0/0 route to a known NAT gateway" 1 \
+            "mismatches:${APP_RT_MISMATCH}"
+        fi
+      fi
+
+      # private-data route tables: none may carry a 0.0.0.0/0 route at all —
+      # that absence is provable via a real describe call, which is exactly
+      # what a plan file cannot do.
+      DATA_RT_IDS_JSON="$(printf '%s' "${OUTPUT_JSON}" | jq -c '.private_data_route_table_ids.value // []' 2>/dev/null)"
+      DATA_RT_COUNT="$(printf '%s' "${DATA_RT_IDS_JSON}" | jq 'length' 2>/dev/null)"
+      if [ -z "${DATA_RT_COUNT}" ] || [ "${DATA_RT_COUNT}" -eq 0 ] 2>/dev/null; then
+        check "${env_name}: private_data_route_table_ids output is present and non-empty" 1 \
+          "terraform output -json has no non-empty .private_data_route_table_ids.value"
+      else
+        DATA_RT_LEAK=""
+        for rtid in $(printf '%s' "${DATA_RT_IDS_JSON}" | jq -r '.[]' 2>/dev/null); do
+          RT_DESCRIBE="$(aws_ls ec2 describe-route-tables --route-table-ids "${rtid}" --output json)"
+          RT_HAS_DEFAULT="$(printf '%s' "${RT_DESCRIBE}" | jq -r --arg cidr "0.0.0.0/0" '[.RouteTables[0].Routes[]? | select(.DestinationCidrBlock==$cidr)] | length' 2>/dev/null)"
+          if [ -n "${RT_HAS_DEFAULT}" ] && [ "${RT_HAS_DEFAULT}" != "0" ]; then
+            DATA_RT_LEAK="${DATA_RT_LEAK} ${rtid}(0.0.0.0/0 route count=${RT_HAS_DEFAULT})"
+          fi
+        done
+        if [ -z "${DATA_RT_LEAK}" ]; then
+          check "${env_name}: no private-data route table (${DATA_RT_COUNT}) carries a 0.0.0.0/0 route" 0
+        else
+          check "${env_name}: no private-data route table carries a 0.0.0.0/0 route" 1 \
+            "leaked default route(s):${DATA_RT_LEAK}"
+        fi
+      fi
+    fi
   done
 fi
 
