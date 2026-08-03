@@ -326,6 +326,48 @@ else
             "leaked default route(s):${DATA_RT_LEAK}"
         fi
       fi
+
+      # ---------------------------------------------------------------
+      # S3 gateway VPC endpoint (Plan 02-03, Task 3): attached route-table
+      # id set must equal the union of private_app_route_table_ids and
+      # private_data_route_table_ids, compared sorted. Per the plan's own
+      # instruction: if LocalStack's EC2 emulation does not implement
+      # gateway endpoints at the fidelity these assertions need, the
+      # assertions themselves are NOT weakened — a failure here is a real
+      # signal, recorded in the plan's SUMMARY verification notes rather
+      # than silently softened (a softened assertion is exactly the
+      # fake-success failure IAC-04 exists to catch).
+      # ---------------------------------------------------------------
+      S3_EP_ID="$(printf '%s' "${OUTPUT_JSON}" | jq -r '.s3_vpc_endpoint_id.value // empty' 2>/dev/null)"
+      if [ -z "${S3_EP_ID}" ]; then
+        check "${env_name}: s3_vpc_endpoint_id output is present" 1 \
+          "terraform output -json has no .s3_vpc_endpoint_id.value key"
+      else
+        EP_DESCRIBE="$(aws_ls ec2 describe-vpc-endpoints --vpc-endpoint-ids "${S3_EP_ID}" --output json)"
+        EP_TYPE="$(printf '%s' "${EP_DESCRIBE}" | jq -r '.VpcEndpoints[0].VpcEndpointType // empty' 2>/dev/null)"
+        EP_SERVICE="$(printf '%s' "${EP_DESCRIBE}" | jq -r '.VpcEndpoints[0].ServiceName // empty' 2>/dev/null)"
+        EP_STATE="$(printf '%s' "${EP_DESCRIBE}" | jq -r '.VpcEndpoints[0].State // empty' 2>/dev/null)"
+
+        if [ "${EP_TYPE}" = "Gateway" ] && [[ "${EP_SERVICE}" == *.s3 ]] && [ "${EP_STATE}" = "available" ]; then
+          check "${env_name}: s3_vpc_endpoint_id (${S3_EP_ID}) is a Gateway endpoint for ${EP_SERVICE}, state available" 0
+        else
+          check "${env_name}: s3_vpc_endpoint_id is a Gateway endpoint for an s3 service, state available" 1 \
+            "type=[${EP_TYPE}] service=[${EP_SERVICE}] state=[${EP_STATE}]"
+        fi
+
+        EXPECTED_RT_UNION_SORTED="$(printf '%s\n%s\n' \
+          "$(printf '%s' "${APP_RT_IDS_JSON:-[]}" | jq -r '.[]' 2>/dev/null)" \
+          "$(printf '%s' "${DATA_RT_IDS_JSON:-[]}" | jq -r '.[]' 2>/dev/null)" \
+          | sed '/^$/d' | sort)"
+        OBSERVED_RT_SORTED="$(printf '%s' "${EP_DESCRIBE}" | jq -r '.VpcEndpoints[0].RouteTableIds[]?' 2>/dev/null | sort)"
+
+        if [ -n "${OBSERVED_RT_SORTED}" ] && [ "${EXPECTED_RT_UNION_SORTED}" = "${OBSERVED_RT_SORTED}" ]; then
+          check "${env_name}: s3 endpoint's RouteTableIds equals the union of private_app + private_data route tables, unordered" 0
+        else
+          check "${env_name}: s3 endpoint's RouteTableIds equals the union of private_app + private_data route tables, unordered" 1 \
+            "expected=[${EXPECTED_RT_UNION_SORTED}] observed=[${OBSERVED_RT_SORTED}]"
+        fi
+      fi
     fi
   done
 fi
