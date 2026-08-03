@@ -17,8 +17,8 @@ variable "github_owner" {
     (already owned by an unrelated GitHub account). Override only if the org
     login changes again (e.g. a further fallback suffix).
   EOT
-  type    = string
-  default = "AuraBit"
+  type        = string
+  default     = "AuraBit"
 }
 
 variable "github_token" {
@@ -30,8 +30,8 @@ variable "github_token" {
     Sourced from estate/athena-infra/.governance.env (git-ignored), never
     hardcoded and never printed in plan/apply output.
   EOT
-  type      = string
-  sensitive = true
+  type        = string
+  sensitive   = true
 }
 
 variable "developer_username" {
@@ -41,6 +41,6 @@ variable "developer_username" {
     a platform org is a member of all of them, which is the honest modelling
     per D-07.
   EOT
-  type    = string
-  default = "YahiaEng"
+  type        = string
+  default     = "YahiaEng"
 }
