@@ -1,0 +1,59 @@
+# .checkov.yaml — POL-04 / D-24 hard-blocking Checkov gate config (Plan
+# 02-04, Task 2). Real findings against the tree at the time this file was
+# written drove every entry below — nothing here was guessed at.
+#
+# Deliberately sets NO hard-fail-on / soft-fail-on / severity flag of any
+# kind. Checkov's severity metadata is only populated through a paid
+# Bridgecrew/Prisma Cloud platform connection (RESEARCH.md Common Pitfall
+# #5, confirmed empirically this plan: a scan with no API key carries no
+# severity data on any finding at all) — a severity-threshold gate
+# (`--hard-fail-on HIGH,CRITICAL` or similar) would silently match nothing
+# on this open-source-only install and therefore fail OPEN, not closed.
+# The absence of a severity flag here is not an oversight; it is what makes
+# "hard fail on any failed check" (D-24's chosen semantics, and Checkov's
+# own default behaviour with no soft-fail/hard-fail-on flag at all) actually
+# true. The next reader who wonders why this file looks less configured
+# than they expected: this is why.
+#
+# skip-check below is for findings that are correct to suppress EVERYWHERE
+# this exact pattern ever appears in this estate, forever — not a place to
+# park a finding this plan simply hasn't gotten around to yet. A finding
+# that a specific, named future plan will resolve gets an inline,
+# resource-scoped `# checkov:skip=` suppression instead (see
+# modules/core-network/vpc.tf for two such cases, tied to Plan 02-05 /
+# D-27 / D-28), enforced by scripts/verify-checkov-skips.sh so every one of
+# those carries a real, non-boilerplate reason. This file is only for
+# exclusions that will never stop being correct.
+#
+# POL-04's flagged, now-closed assumption (recorded in this plan's commit
+# message, not just here): a Checkov scan of a directory containing zero
+# Terraform resources, and a scan that hits a parse error, both exit 0 with
+# no visible failure signal (empirically confirmed this plan against this
+# exact checkov 3.3.9 install) — a vacuous scan reports the same "green" as
+# a scan that genuinely inspected everything and found nothing wrong. This
+# config file cannot close that hole by itself (it is a Checkov behaviour,
+# not a config option) — the `static` job in
+# .github/workflows/terraform-core-network.yml adds an explicit
+# scanned-resource-count guard immediately after every invocation of this
+# config for exactly this reason.
+
+framework:
+  - terraform
+
+directory:
+  - modules
+  - envs
+
+quiet: true
+compact: true
+
+skip-check:
+  # CKV2_AWS_19 — "Ensure that all EIP addresses allocated to a VPC are
+  # attached to EC2 instances." This check has no concept of a NAT Gateway
+  # (aws_nat_gateway) as a valid EIP attachment target — every NAT
+  # gateway's Elastic IP in this estate (modules/core-network/nat.tf,
+  # applied in every env, D-22) trips this finding forever, regardless of
+  # stack or environment. This is a Checkov false positive for a permanent,
+  # deliberate architectural pattern, not a temporary gap this estate
+  # intends to close later — genuinely correct to exclude estate-wide.
+  - CKV2_AWS_19
