@@ -1,0 +1,21 @@
+# Copy this file to terraform.tfvars (git-ignored, per *.auto.tfvars/.gitignore
+# rules already established in Plan 01) and fill in real values. NEVER commit
+# a filled-in terraform.tfvars — only this .example file with placeholder-only
+# values is tracked.
+#
+# All three values below also live in estate/athena-infra/.governance.env
+# (git-ignored) for shell-exported use by imports.sh and any ad-hoc `gh`/curl
+# verification commands. Terraform itself reads these three via -var-file or
+# TF_VAR_ environment variables — pick one approach and use it consistently.
+
+# The org login. Defaults to "AuraBit" in variables.tf if left unset here.
+github_owner = "AuraBit"
+
+# A PAT authenticating as the athena-ci-bot machine account (D-03), scoped
+# with org admin + repo + workflow permissions.
+# Obtain at: github.com -> (log in as athena-ci-bot) -> Settings ->
+# Developer settings -> Fine-grained tokens -> Generate new token
+github_token = ""
+
+# The human developer's GitHub login (added to every team per D-07).
+developer_username = "YahiaEng"
