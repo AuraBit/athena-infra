@@ -1,0 +1,31 @@
+# namespaces.yaml — dev/stg/prod workload namespaces on the app cluster
+# (Plan 02, Task 2; CONTEXT.md FOUND-01). These belong on the app cluster
+# only — the platform cluster's workloads are tooling (ArgoCD, Prometheus
+# stack, Vault, SonarQube), not environment-scoped Athena workloads.
+#
+# Each namespace carries an `athena.net/environment` label keyed to its own
+# name so Phase 3's Kustomize overlays and Phase 4's Prometheus relabelling
+# have a stable selector to key on, rather than relying on the namespace
+# name string itself.
+#
+# Apply with: kubectl --context k3d-app apply -f clusters/app/namespaces.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dev
+  labels:
+    athena.net/environment: dev
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: stg
+  labels:
+    athena.net/environment: stg
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: prod
+  labels:
+    athena.net/environment: prod
