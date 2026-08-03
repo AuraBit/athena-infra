@@ -1,6 +1,6 @@
 name: lint
 
-# athena-infra deliberately has no merge_group trigger — D-02 restricts the
+# athena-infra deliberately has no merge-queue trigger — D-02 restricts the
 # merge queue to athena-app only. This repo serialises concurrent changes at
 # the correct layer instead: Phase 2's terraform-<env> Actions concurrency
 # groups, not a merge queue.
