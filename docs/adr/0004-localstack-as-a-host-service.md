@@ -43,7 +43,12 @@ against each returns a license-gated `InternalFailure` instead. `s3`,
 The LocalStack Open-Source Program application (which would unlock the free
 Ultimate tier covering all four gated services) requires a public repo and
 an OSI license — both now satisfied — and was deliberately deferred to
-after Plan 04's repos went public; its outcome is not yet known.
+after Plan 04's repos went public; its outcome is not yet known. As of
+2026-08-03, eligibility remains fully confirmed but submission is still
+deliberately deferred, by explicit project-owner decision, until more of the
+estate is visibly built out on `github.com/AuraBit` to strengthen the
+application's presentation to reviewers — there is no fixed submission date,
+and the application has not yet been filed.
 
 ## Consequences
 
