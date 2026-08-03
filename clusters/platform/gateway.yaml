@@ -1,0 +1,62 @@
+# gateway.yaml — Gateway API objects for the platform cluster (Plan 02,
+# Task 1; CONTEXT.md D-11/D-12/D-13). Mirrors clusters/app/gateway.yaml
+# exactly, differing only in the domain names (platform.athena.net instead
+# of athena.net) — the app cluster's Gateway/Certificate/GatewayClass shape
+# is the proven architecture, reused verbatim for the platform domain.
+#
+# GatewayClass.controllerName is Envoy Gateway's own controller identity,
+# same as the app cluster's — each cluster has its own Envoy Gateway
+# install (Plan 02, Task 1) and therefore its own independent GatewayClass
+# object, even though the identity string is identical.
+#
+# The Certificate is declarative (not an imperative `kubectl create secret
+# tls`) per D-13, requesting both the platform wildcard and apex from this
+# cluster's own `mkcert-issuer` ClusterIssuer (clusters/common/
+# mkcert-clusterissuer.yaml, applied independently to k3d-platform) — the
+# two clusters share CA material, not a shared ClusterIssuer object
+# (RESEARCH.md Anti-Patterns: "not shared state").
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: envoy
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: platform-athena-net-wildcard
+  namespace: gateway
+spec:
+  secretName: platform-athena-net-wildcard-tls
+  issuerRef:
+    name: mkcert-issuer
+    kind: ClusterIssuer
+  dnsNames:
+    - "platform.athena.net"
+    - "*.platform.athena.net"
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: athena-platform
+  namespace: gateway
+spec:
+  gatewayClassName: envoy
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: "*.platform.athena.net"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: platform-athena-net-wildcard-tls
+      allowedRoutes:
+        namespaces:
+          from: All

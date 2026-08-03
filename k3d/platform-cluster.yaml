@@ -1,0 +1,59 @@
+# platform-cluster.yaml — declarative k3d config for the "platform" cluster
+# (Plan 02, Task 1). Mirrors k3d/app-cluster.yaml's architecture exactly —
+# same schema, same k3s image pin, same --disable=traefik / --node-taint
+# extraArgs, same kubeconfig options — and differs in exactly four places
+# per CONTEXT.md D-14/D-12:
+#
+#   1. agents: 2 instead of 3 (servers: 1 unchanged) — the platform cluster
+#      runs tooling (ArgoCD, Prometheus stack, Vault, SonarQube), not
+#      environment-scoped Athena workloads, so it needs less workload
+#      capacity than the app cluster's dev/stg/prod split.
+#   2. ports binds 127.0.0.2:443:443 (not 127.0.0.1) — its own dedicated
+#      loopback address, so both clusters serve clean :443 with no port
+#      suffix and no collision. 127.0.0.0/8 is entirely loopback on Linux.
+#   3. registries uses a `use` reference to the already-created
+#      athena-registry (created once, by the app cluster's config) rather
+#      than a second `create` block — one registry, shared by both
+#      clusters and the host (FOUND-03).
+#   4. metadata.name (and name-derived labels): platform.
+#
+# Everything else is copied deliberately: rancher/k3s:v1.35.5-k3s1 (the same
+# pinned Kubernetes minor Plan 01 recorded — do not re-derive or bump this;
+# both clusters must run the same Kubernetes minor), --disable=traefik and
+# --node-taint=CriticalAddonsOnly=true:NoExecute applied to server:* in the
+# same create invocation (RESEARCH.md Pitfall 1 applies identically here —
+# tainting an already-running cluster with Traefik still enabled hangs
+# forever), and updateDefaultKubeconfig: true / switchCurrentContext: false.
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: platform
+servers: 1
+agents: 2
+image: rancher/k3s:v1.35.5-k3s1
+ports:
+  # Loopback-scoped :443 binding (D-12): dnsmasq resolves
+  # *.platform.athena.net to this exact loopback address (127.0.0.2),
+  # distinct from the app cluster's 127.0.0.1 — both get a clean
+  # https://<host> URL with no port number and no collision.
+  - port: 127.0.0.2:443:443
+    nodeFilters:
+      - loadbalancer
+options:
+  k3s:
+    extraArgs:
+      - arg: "--disable=traefik"
+        nodeFilters: ["server:*"]
+      - arg: "--node-taint=CriticalAddonsOnly=true:NoExecute"
+        nodeFilters: ["server:*"]
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    # Never silently repoint the operator's current kube-context just because
+    # a cluster was created — this host already has unrelated contexts in use.
+    switchCurrentContext: false
+registries:
+  # FOUND-03: attach to the single shared registry the app cluster's config
+  # already created (k3d/app-cluster.yaml's registries.create block) — one
+  # registry serving both clusters and the host, not a second instance.
+  use:
+    - athena-registry:5000
