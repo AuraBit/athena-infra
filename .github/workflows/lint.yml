@@ -1,0 +1,52 @@
+name: lint
+
+# athena-infra deliberately has no merge_group trigger — D-02 restricts the
+# merge queue to athena-app only. This repo serialises concurrent changes at
+# the correct layer instead: Phase 2's terraform-<env> Actions concurrency
+# groups, not a merge queue.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Org default is already read-only (actions-security.tf); this workflow
+# states its own baseline explicitly too, per the shared security shape
+# every workflow in this estate copies (D-08).
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # actions/checkout pinned to a full 40-character commit SHA, not a
+      # mutable tag — the control against the tj-actions-style supply-chain
+      # compromise, where a tag was repointed at malicious code after the
+      # fact. A SHA is immutable; a tag is not.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: install terraform
+        run: |
+          set -euo pipefail
+          TF_VERSION="1.15.8"
+          curl -sSLo /tmp/terraform.zip "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
+          unzip -o /tmp/terraform.zip -d /tmp
+          sudo mv /tmp/terraform /usr/local/bin/terraform
+          terraform version
+
+      - name: terraform fmt -check -recursive (governance stack)
+        run: terraform fmt -check -recursive governance/
+
+      - name: YAML syntax parse — k3d cluster configs and Ansible files
+        run: |
+          set -euo pipefail
+          # Ruby's stdlib Psych YAML parser ships on every GitHub-hosted
+          # ubuntu-latest runner — a real syntax check with zero extra
+          # installs beyond what the image already provides.
+          find k3d clusters ansible -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 \
+            | xargs -0 -n1 ruby -ryaml -e 'YAML.load_file(ARGV[0])' --
+          echo "All k3d/clusters/ansible YAML files parsed cleanly."
