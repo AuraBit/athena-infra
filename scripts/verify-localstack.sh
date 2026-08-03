@@ -70,10 +70,23 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Health endpoint returns a body whose services map is non-empty
+# 2. Health endpoint returns a body whose services map is non-empty. Retries
+#    briefly: a just-(re)started LocalStack container reports systemd-active
+#    and even answers the socket before its own app has finished booting
+#    (observed live after `systemctl restart localstack` — first curl
+#    returned an empty body, a few seconds later it returned the full
+#    services map), so a single immediate curl here would be racy.
 # ---------------------------------------------------------------------------
-HEALTH_BODY="$(curl -sS "${LS_ENDPOINT}/_localstack/health" 2>/dev/null)" || HEALTH_BODY=""
-HEALTH_SERVICE_COUNT="$(printf '%s' "${HEALTH_BODY}" | jq -r '.services // {} | length' 2>/dev/null)" || HEALTH_SERVICE_COUNT="0"
+HEALTH_BODY=""
+HEALTH_SERVICE_COUNT="0"
+for _ in $(seq 1 12); do
+  HEALTH_BODY="$(curl -sS "${LS_ENDPOINT}/_localstack/health" 2>/dev/null)" || HEALTH_BODY=""
+  HEALTH_SERVICE_COUNT="$(printf '%s' "${HEALTH_BODY}" | jq -r '.services // {} | length' 2>/dev/null)" || HEALTH_SERVICE_COUNT="0"
+  if [ -n "${HEALTH_BODY}" ] && [ "${HEALTH_SERVICE_COUNT}" -gt 0 ] 2>/dev/null; then
+    break
+  fi
+  sleep 5
+done
 if [ -n "${HEALTH_BODY}" ] && [ "${HEALTH_SERVICE_COUNT}" -gt 0 ] 2>/dev/null; then
   check "health endpoint returns a non-empty services map (${HEALTH_SERVICE_COUNT} services)" 0
 else
