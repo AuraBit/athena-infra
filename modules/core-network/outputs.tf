@@ -36,3 +36,30 @@ output "subnet_ids_by_tier" {
   description = "Map of tier name -> list of subnet ids in that tier. scripts/verify-network.sh reads the three per-tier outputs above rather than this map directly, but it is useful for quick inspection (`terraform output subnet_ids_by_tier`)."
   value       = local.subnet_ids_by_tier
 }
+
+# --- Plan 02-03, Task 2: internet gateway, NAT and route table outputs -----
+
+output "internet_gateway_id" {
+  description = "ID of the internet gateway attached to this VPC."
+  value       = aws_internet_gateway.this.id
+}
+
+output "nat_gateway_ids" {
+  description = "IDs of every NAT gateway this module created — one entry when single_nat_gateway is true, one per AZ when false."
+  value       = [for az, nat in aws_nat_gateway.this : nat.id]
+}
+
+output "public_route_table_id" {
+  description = "ID of the single shared public route table."
+  value       = aws_route_table.public.id
+}
+
+output "private_app_route_table_ids" {
+  description = "IDs of the private-app route tables, one per AZ."
+  value       = [for az, rt in aws_route_table.private_app : rt.id]
+}
+
+output "private_data_route_table_ids" {
+  description = "IDs of the private-data route tables, one per AZ. None of these carry a 0.0.0.0/0 route — that absence is the tier's whole purpose."
+  value       = [for az, rt in aws_route_table.private_data : rt.id]
+}
