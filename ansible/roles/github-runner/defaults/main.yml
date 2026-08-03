@@ -66,3 +66,43 @@ athena_runner_work_folder: "_work"
 # throughout tasks/main.yml's assertions).
 # ---------------------------------------------------------------------------
 athena_runner_pat_file: "/etc/athena-runner/github-runner-pat"
+
+# ---------------------------------------------------------------------------
+# CI toolchain — D-14: this host is a golden agent image. Every tool a CI
+# job invokes on the self-hosted runner is Ansible-installed at a pinned
+# version, the pins living here beside the runner-binary pin above.
+# GitHub-hosted jobs use `setup-*` actions instead of this block (that split
+# is Plan 02-04's territory, not this role's).
+# ---------------------------------------------------------------------------
+
+# Terraform — this literal MUST equal TF_VERSION in
+# .github/workflows/lint.yml (Plan 02-02 acceptance criteria assert this by
+# extracting both and comparing). A drift between these two values is itself
+# the defect: a hosted static job (fmt/validate) and a self-hosted job
+# (plan/apply/awslocal verify/terraform test, per D-11) must agree on the
+# exact Terraform version or fmt/validate disagreements become
+# unreproducible between the two job types.
+athena_terraform_version: "1.15.8"
+athena_terraform_download_url: "https://releases.hashicorp.com/terraform/{{ athena_terraform_version }}/terraform_{{ athena_terraform_version }}_linux_amd64.zip"
+athena_terraform_checksum_sha256: "d25ce7b6902013ad905db3d2eab0be4cd905887fe88b81a6171b8d5503c31f3d"
+
+# checkov and awscli-local — pip packages, pinned per the package-legitimacy
+# checkpoint (Plan 02-02 Task 1; T-02-SC), each version confirmed live
+# against its PyPI project page (bridgecrewio/checkov,
+# localstack/awscli-local) before being pinned here. Unlike the Terraform
+# zip and the runner tarball above, PyPI ships no per-artifact checksum for
+# either package, so these two get the version-marker-file idempotency
+# treatment (a rendered "tool=version" fingerprint compared against a marker
+# file, see tasks/main.yml) instead of a `checksum:` argument — a
+# deliberate, called-out difference in verification strength, not an
+# oversight.
+athena_checkov_version: "3.3.9"
+athena_awscli_local_version: "0.22.2"
+
+# Dedicated virtualenv, owned by the runner user, isolated from the host's
+# system Python — a system-wide `pip install` on this Arch host fights the
+# distro package manager (PEP 668 externally-managed-environment); a venv
+# sidesteps that entirely. checkov and awslocal are symlinked from here onto
+# /usr/local/bin (already on the runner user's PATH via /etc/profile, and on
+# the systemd unit's default PATH) so CI job steps invoke them by bare name.
+athena_runner_tool_venv: "{{ athena_runner_home }}/.tooling"

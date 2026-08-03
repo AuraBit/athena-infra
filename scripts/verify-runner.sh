@@ -19,6 +19,16 @@ ESTATE_ROOT="${REPO_ROOT}/.."
 RUNNER_USER="athena-runner"
 RUNNER_HOME="/home/athena-runner"
 EXPECTED_LABEL="athena-local"
+RUNNER_DEFAULTS="${REPO_ROOT}/ansible/roles/github-runner/defaults/main.yml"
+
+# Read expected toolchain versions out of the role's own defaults rather
+# than duplicating the literals here — Plan 02-02's key_link between this
+# script and defaults/main.yml depends on the two never being able to drift.
+read_default() {
+  grep -oE "^$1: \"[^\"]+\"" "${RUNNER_DEFAULTS}" | sed -E "s/^$1: \"([^\"]+)\"/\1/"
+}
+EXPECTED_TERRAFORM_VERSION="$(read_default athena_terraform_version)"
+EXPECTED_CHECKOV_VERSION="$(read_default athena_checkov_version)"
 WORKFLOWS=(
   "${REPO_ROOT}/.github/workflows/lint.yml"
   "${REPO_ROOT}/.github/workflows/heavy-selfhosted.yml"
@@ -106,6 +116,36 @@ if printf '%s' "${RUNNER_GROUPS}" | grep -qw docker; then
 else
   check "OS user '${RUNNER_USER}' exists and is in the docker group" 1 \
     "id -nG ${RUNNER_USER} => [${RUNNER_GROUPS}]"
+fi
+
+# ---------------------------------------------------------------------------
+# 3b. Pinned CI toolchain (D-14; Plan 02-02) — terraform, checkov, awslocal
+#     must each resolve for the runner user and report the version pinned
+#     in defaults/main.yml. A missing/wrong-version tool here is a red
+#     verification run, not a CI surprise.
+# ---------------------------------------------------------------------------
+TERRAFORM_OUT="$(sudo -u "${RUNNER_USER}" bash -lc 'terraform version' 2>&1 || true)"
+if printf '%s' "${TERRAFORM_OUT}" | grep -qF "Terraform v${EXPECTED_TERRAFORM_VERSION}"; then
+  check "terraform resolves for ${RUNNER_USER} at pinned version ${EXPECTED_TERRAFORM_VERSION}" 0
+else
+  check "terraform resolves for ${RUNNER_USER} at pinned version ${EXPECTED_TERRAFORM_VERSION}" 1 \
+    "observed=[${TERRAFORM_OUT}]"
+fi
+
+CHECKOV_OUT="$(sudo -u "${RUNNER_USER}" bash -lc 'checkov --version' 2>&1 || true)"
+if printf '%s' "${CHECKOV_OUT}" | grep -qF "${EXPECTED_CHECKOV_VERSION}"; then
+  check "checkov resolves for ${RUNNER_USER} at pinned version ${EXPECTED_CHECKOV_VERSION}" 0
+else
+  check "checkov resolves for ${RUNNER_USER} at pinned version ${EXPECTED_CHECKOV_VERSION}" 1 \
+    "observed=[${CHECKOV_OUT}]"
+fi
+
+sudo -u "${RUNNER_USER}" bash -lc 'awslocal --version' >/dev/null 2>&1
+AWSLOCAL_RC=$?
+if [ "${AWSLOCAL_RC}" -eq 0 ]; then
+  check "awslocal resolves and runs for ${RUNNER_USER}" 0
+else
+  check "awslocal resolves and runs for ${RUNNER_USER}" 1 "rc=${AWSLOCAL_RC}"
 fi
 
 # ---------------------------------------------------------------------------

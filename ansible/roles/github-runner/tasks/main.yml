@@ -182,6 +182,144 @@
         state: absent
 
 # ---------------------------------------------------------------------------
+# 3b. CI toolchain — terraform, checkov, awslocal (D-14: golden agent image;
+#     Plan 02-02 Task 2). Same version-marker-file idempotency shape as the
+#     runner-binary block above: stat a marker, compare against a rendered
+#     "terraform=<v> checkov=<v> awslocal=<v>" fingerprint, and run the
+#     install block only when they differ. The marker is written last, so a
+#     partially-failed install never records success.
+# ---------------------------------------------------------------------------
+- name: Check the installed toolchain fingerprint marker
+  become: true
+  ansible.builtin.stat:
+    path: "{{ athena_runner_home }}/.athena-tooling-version"
+  register: athena_tooling_version_marker
+
+- name: Read the installed toolchain fingerprint, if any
+  become: true
+  ansible.builtin.slurp:
+    src: "{{ athena_runner_home }}/.athena-tooling-version"
+  register: athena_tooling_installed_raw
+  when: athena_tooling_version_marker.stat.exists
+
+- name: Set the toolchain fingerprint facts
+  ansible.builtin.set_fact:
+    athena_tooling_installed_fingerprint: >-
+      {{ (athena_tooling_installed_raw.content | b64decode | trim)
+         if athena_tooling_version_marker.stat.exists else '' }}
+    athena_tooling_pinned_fingerprint: >-
+      terraform={{ athena_terraform_version }} checkov={{ athena_checkov_version }} awslocal={{ athena_awscli_local_version }}
+
+- name: Install the pinned CI toolchain (only when the fingerprint differs)
+  become: true
+  when: athena_tooling_installed_fingerprint != athena_tooling_pinned_fingerprint
+  block:
+    - name: Download the pinned Terraform zip, verifying its checksum
+      ansible.builtin.get_url:
+        url: "{{ athena_terraform_download_url }}"
+        dest: "/tmp/terraform_{{ athena_terraform_version }}_linux_amd64.zip"
+        checksum: "sha256:{{ athena_terraform_checksum_sha256 }}"
+        mode: "0644"
+
+    - name: Unpack Terraform onto the runner user's PATH (/usr/local/bin)
+      ansible.builtin.unarchive:
+        src: "/tmp/terraform_{{ athena_terraform_version }}_linux_amd64.zip"
+        dest: /usr/local/bin
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Remove the downloaded Terraform zip
+      ansible.builtin.file:
+        path: "/tmp/terraform_{{ athena_terraform_version }}_linux_amd64.zip"
+        state: absent
+
+    - name: Verify the installed Terraform binary reports the pinned version
+      ansible.builtin.command:
+        cmd: /usr/local/bin/terraform version
+      register: athena_terraform_version_check
+      changed_when: false
+
+    - name: Fail loudly if Terraform does not report the pinned version
+      ansible.builtin.fail:
+        msg: "Expected Terraform {{ athena_terraform_version }}, got: {{ athena_terraform_version_check.stdout }}"
+      when: athena_terraform_version not in athena_terraform_version_check.stdout
+
+    - name: Ensure the tooling virtualenv directory exists, owned by the runner user
+      ansible.builtin.file:
+        path: "{{ athena_runner_tool_venv }}"
+        state: directory
+        owner: "{{ athena_runner_user }}"
+        group: "{{ athena_runner_user }}"
+        mode: "0750"
+
+    - name: Create the tooling virtualenv (checkov + awslocal, isolated from system Python)
+      become_user: "{{ athena_runner_user }}"
+      ansible.builtin.command:
+        cmd: "python3 -m venv {{ athena_runner_tool_venv }}"
+        creates: "{{ athena_runner_tool_venv }}/bin/python3"
+
+    - name: Install checkov and awscli-local at their exact pinned versions
+      become_user: "{{ athena_runner_user }}"
+      ansible.builtin.pip:
+        name:
+          - "checkov=={{ athena_checkov_version }}"
+          - "awscli-local=={{ athena_awscli_local_version }}"
+        virtualenv: "{{ athena_runner_tool_venv }}"
+        state: present
+
+    - name: Symlink checkov onto the runner user's PATH
+      ansible.builtin.file:
+        src: "{{ athena_runner_tool_venv }}/bin/checkov"
+        dest: /usr/local/bin/checkov
+        state: link
+        force: true
+
+    - name: Symlink awslocal onto the runner user's PATH
+      ansible.builtin.file:
+        src: "{{ athena_runner_tool_venv }}/bin/awslocal"
+        dest: /usr/local/bin/awslocal
+        state: link
+        force: true
+
+    - name: Verify checkov reports the pinned version
+      ansible.builtin.command:
+        cmd: /usr/local/bin/checkov --version
+      register: athena_checkov_version_check
+      changed_when: false
+
+    - name: Fail loudly if checkov does not report the pinned version
+      ansible.builtin.fail:
+        msg: "Expected checkov {{ athena_checkov_version }}, got: {{ athena_checkov_version_check.stdout }}"
+      when: athena_checkov_version not in athena_checkov_version_check.stdout
+
+    # awscli-local ships no clean self-reported version string of its own
+    # (it execs the system `aws` CLI when the awscli package isn't in its
+    # own venv — a deliberate choice here, see the defaults/main.yml comment
+    # on athena_runner_tool_venv) — probe exit code only, matching the role
+    # convention of "fail loudly with the observed output" rather than
+    # parsing a string that isn't guaranteed to exist.
+    - name: Verify awslocal runs
+      ansible.builtin.command:
+        cmd: /usr/local/bin/awslocal --version
+      register: athena_awslocal_version_check
+      changed_when: false
+
+    - name: Fail loudly if awslocal does not run
+      ansible.builtin.fail:
+        msg: "awslocal --version failed: {{ athena_awslocal_version_check.stdout }} {{ athena_awslocal_version_check.stderr }}"
+      when: athena_awslocal_version_check.rc != 0
+
+    - name: Record the installed toolchain fingerprint marker
+      ansible.builtin.copy:
+        dest: "{{ athena_runner_home }}/.athena-tooling-version"
+        content: "{{ athena_tooling_pinned_fingerprint }}\n"
+        owner: "{{ athena_runner_user }}"
+        group: "{{ athena_runner_user }}"
+        mode: "0644"
+
+# ---------------------------------------------------------------------------
 # 4. jitconfig.sh — the per-start credential fetch (RESEARCH.md Pattern 4).
 # ---------------------------------------------------------------------------
 - name: Render jitconfig.sh into the runner home
