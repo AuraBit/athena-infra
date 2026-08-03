@@ -11,14 +11,18 @@
 # module version actually applied. An exact tag pin makes "what applied to
 # dev on 2026-08-03" an answerable, auditable question.
 module "core_network" {
-  source = "git::https://github.com/AuraBit/athena-infra.git//modules/core-network?ref=modules/core-network/v0.2.0"
+  source = "git::https://github.com/AuraBit/athena-infra.git//modules/core-network?ref=modules/core-network/v0.3.0"
 
-  name_prefix = var.name_prefix
-  environment = var.environment
-  vpc_cidr    = var.vpc_cidr
+  name_prefix        = var.name_prefix
+  environment        = var.environment
+  vpc_cidr           = var.vpc_cidr
+  single_nat_gateway = var.single_nat_gateway
 
   # availability_zones/subnet_newbits deliberately not overridden here: the
   # module's own defaults (three us-east-1 AZs, /20 subnets) already match
-  # dev exactly (D-21). stg/prod env roots (Plan 02-08+) pass these
-  # explicitly once their own AZ/CIDR requirements diverge from dev's.
+  # dev exactly (D-21). single_nat_gateway IS wired through explicitly (see
+  # variables.tf) so the toggle is a real, plannable input at this root —
+  # `terraform plan -var single_nat_gateway=false` is how D-22's cost-vs-HA
+  # trade-off gets demonstrated, not just asserted in a comment. Prod's env
+  # root (Plan 02-08+) sets its own tfvars value to false.
 }
