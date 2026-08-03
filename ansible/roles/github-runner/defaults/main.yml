@@ -22,7 +22,22 @@ athena_runner_checksum_sha256: "04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e
 # Organisation-level registration
 # ---------------------------------------------------------------------------
 athena_runner_org: "AuraBit"
-athena_runner_name: "athena-runner-01"
+
+# Retired: athena_runner_name (fixed "athena-runner-01"). Plan 02-02 Task 3
+# pools the runner into N templated systemd instances (athena-runner@1,
+# athena-runner@2, ...), each registering under a distinct name derived from
+# this prefix + the systemd instance name (%i) — see
+# templates/jitconfig.sh.j2.
+athena_runner_name_prefix: "athena-runner"
+
+# D-11 puts every job that needs localhost:4566 (plan, apply, terraform
+# test, the awslocal verify) on self-hosted, and D-01's flow means a PR plan
+# and a main apply can be in flight at the same moment. One runner unit
+# makes those serialise on runner capacity alone, which is indistinguishable
+# in the Actions UI from the state-lock queuing IAC-03's drill is meant to
+# demonstrate. Two units separate the two phenomena cleanly; the knob exists
+# so it can be raised if a later phase needs more headroom.
+athena_runner_pool_size: 2
 
 # The estate-specific label alongside the three standard ones. Phases 2, 3,
 # and 7 target this exact list in their `runs-on:` — see

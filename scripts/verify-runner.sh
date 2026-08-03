@@ -29,6 +29,8 @@ read_default() {
 }
 EXPECTED_TERRAFORM_VERSION="$(read_default athena_terraform_version)"
 EXPECTED_CHECKOV_VERSION="$(read_default athena_checkov_version)"
+EXPECTED_NAME_PREFIX="$(read_default athena_runner_name_prefix)"
+EXPECTED_POOL_SIZE="$(grep -oE '^athena_runner_pool_size: [0-9]+' "${RUNNER_DEFAULTS}" | grep -oE '[0-9]+$')"
 WORKFLOWS=(
   "${REPO_ROOT}/.github/workflows/lint.yml"
   "${REPO_ROOT}/.github/workflows/heavy-selfhosted.yml"
@@ -65,19 +67,33 @@ gh_runner_api() {
 }
 
 # ---------------------------------------------------------------------------
-# 1. systemd unit enabled and active
+# 1. Every pool instance's systemd unit is enabled and active, and the
+#    pre-pool single unit (athena-runner.service, no @N) is gone (D-12,
+#    Plan 02-02 Task 3) — an administrator who forgot to retire it would
+#    otherwise be running pool_size+1 registered runners, not pool_size.
 # ---------------------------------------------------------------------------
-UNIT_ENABLED="$(systemctl is-enabled athena-runner 2>/dev/null || true)"
-UNIT_ACTIVE="$(systemctl is-active athena-runner 2>/dev/null || true)"
-if [ "${UNIT_ENABLED}" = "enabled" ] && [ "${UNIT_ACTIVE}" = "active" ]; then
-  check "athena-runner.service is enabled and active" 0
+for i in $(seq 1 "${EXPECTED_POOL_SIZE}"); do
+  UNIT_ENABLED="$(systemctl is-enabled "athena-runner@${i}" 2>/dev/null || true)"
+  UNIT_ACTIVE="$(systemctl is-active "athena-runner@${i}" 2>/dev/null || true)"
+  if [ "${UNIT_ENABLED}" = "enabled" ] && [ "${UNIT_ACTIVE}" = "active" ]; then
+    check "athena-runner@${i}.service is enabled and active" 0
+  else
+    check "athena-runner@${i}.service is enabled and active" 1 \
+      "enabled=[${UNIT_ENABLED}] active=[${UNIT_ACTIVE}]"
+  fi
+done
+
+LEGACY_UNIT_LISTING="$(systemctl list-unit-files athena-runner.service --no-legend 2>/dev/null || true)"
+if [ -z "${LEGACY_UNIT_LISTING}" ]; then
+  check "pre-pool athena-runner.service (no @N) is retired" 0
 else
-  check "athena-runner.service is enabled and active" 1 \
-    "enabled=[${UNIT_ENABLED}] active=[${UNIT_ACTIVE}]"
+  check "pre-pool athena-runner.service (no @N) is retired" 1 \
+    "observed=[${LEGACY_UNIT_LISTING}]"
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Org reports >=1 online runner carrying the estate label, and its
+# 2. Org reports >=pool_size online runners carrying the estate label, with
+#    distinct names all prefixed with the role's naming prefix, and the
 #    ephemeral flag is set. The org-level runners API omits `ephemeral` from
 #    both the list and detail endpoints for this org (live finding, this
 #    plan — the field is documented as optional in GitHub's own OpenAPI
@@ -91,21 +107,34 @@ fi
 RUNNERS_JSON="$(gh_runner_api "/actions/runners?per_page=100")"
 ONLINE_LABELED_COUNT="$(printf '%s' "${RUNNERS_JSON}" | jq --arg label "${EXPECTED_LABEL}" \
   '[.runners[] | select(.status=="online") | select([.labels[].name] | index($label))] | length' 2>/dev/null || echo 0)"
-if [ "${ONLINE_LABELED_COUNT}" -ge 1 ] 2>/dev/null; then
-  check "organisation reports >=1 online runner carrying the '${EXPECTED_LABEL}' label" 0
+if [ "${ONLINE_LABELED_COUNT}" -ge "${EXPECTED_POOL_SIZE}" ] 2>/dev/null; then
+  check "organisation reports >=${EXPECTED_POOL_SIZE} online runner(s) carrying the '${EXPECTED_LABEL}' label" 0
 else
-  check "organisation reports >=1 online runner carrying the '${EXPECTED_LABEL}' label" 1 \
-    "online_labeled_count=[${ONLINE_LABELED_COUNT}]"
+  check "organisation reports >=${EXPECTED_POOL_SIZE} online runner(s) carrying the '${EXPECTED_LABEL}' label" 1 \
+    "online_labeled_count=[${ONLINE_LABELED_COUNT}] expected_pool_size=[${EXPECTED_POOL_SIZE}]"
+fi
+
+ONLINE_LABELED_NAMES="$(printf '%s' "${RUNNERS_JSON}" | jq -r --arg label "${EXPECTED_LABEL}" \
+  '[.runners[] | select(.status=="online") | select([.labels[].name] | index($label)) | .name] | unique | .[]' 2>/dev/null || true)"
+DISTINCT_NAME_COUNT="$(printf '%s\n' "${ONLINE_LABELED_NAMES}" | grep -c . || true)"
+NON_PREFIXED_COUNT="$(printf '%s\n' "${ONLINE_LABELED_NAMES}" | grep -vc "^${EXPECTED_NAME_PREFIX}-" || true)"
+if [ "${DISTINCT_NAME_COUNT}" -ge "${EXPECTED_POOL_SIZE}" ] 2>/dev/null && [ "${NON_PREFIXED_COUNT}" = "0" ]; then
+  check "online labeled runners have distinct names, all prefixed '${EXPECTED_NAME_PREFIX}-'" 0
+else
+  check "online labeled runners have distinct names, all prefixed '${EXPECTED_NAME_PREFIX}-'" 1 \
+    "names=[$(printf '%s' "${ONLINE_LABELED_NAMES}" | tr '\n' ',')]"
 fi
 
 RUNNER_FILE_JSON="$(sudo cat "${RUNNER_HOME}/.runner" 2>/dev/null || true)"
 RUNNER_EPHEMERAL="$(printf '%s' "${RUNNER_FILE_JSON}" | jq -r '.Ephemeral // empty' 2>/dev/null || true)"
-if [ "${RUNNER_EPHEMERAL}" = "True" ]; then
-  check "runner's own registration state (.runner) reports Ephemeral=True" 0
-else
-  check "runner's own registration state (.runner) reports Ephemeral=True" 1 \
-    "observed=[${RUNNER_EPHEMERAL}] (raw: ${RUNNER_FILE_JSON:0:200})"
-fi
+for i in $(seq 1 "${EXPECTED_POOL_SIZE}"); do
+  if [ "${RUNNER_EPHEMERAL}" = "True" ]; then
+    check "pool instance ${i}'s registration state (.runner) reports Ephemeral=True" 0
+  else
+    check "pool instance ${i}'s registration state (.runner) reports Ephemeral=True" 1 \
+      "observed=[${RUNNER_EPHEMERAL}] (raw: ${RUNNER_FILE_JSON:0:200})"
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # 3. Runner OS user exists and is in the docker group
@@ -162,11 +191,15 @@ else
     "leaked_in=[${PAT_LEAK_FILES}]"
 fi
 
-JOURNAL_TOKEN_COUNT="$(sudo journalctl -u athena-runner --no-pager 2>/dev/null | grep -Ec 'ghp_|github_pat_' || true)"
+JOURNAL_UNITS=()
+for i in $(seq 1 "${EXPECTED_POOL_SIZE}"); do
+  JOURNAL_UNITS+=("-u" "athena-runner@${i}")
+done
+JOURNAL_TOKEN_COUNT="$(sudo journalctl "${JOURNAL_UNITS[@]}" --no-pager 2>/dev/null | grep -Ec 'ghp_|github_pat_' || true)"
 if [ "${JOURNAL_TOKEN_COUNT}" = "0" ]; then
-  check "athena-runner journal contains no token-shaped string (ghp_/github_pat_)" 0
+  check "athena-runner pool journals contain no token-shaped string (ghp_/github_pat_)" 0
 else
-  check "athena-runner journal contains no token-shaped string (ghp_/github_pat_)" 1 \
+  check "athena-runner pool journals contain no token-shaped string (ghp_/github_pat_)" 1 \
     "match_count=[${JOURNAL_TOKEN_COUNT}]"
 fi
 

@@ -1,13 +1,14 @@
-# Runbook: Self-Hosted Runner Operations (D-16, D-17)
+# Runbook: Self-Hosted Runner Operations (D-16, D-17, D-12)
 
 **When to use this:** operating, troubleshooting, or extending the
-`athena-runner` systemd service, or deciding whether a green `act` run is
+`athena-runner@N` systemd pool, or deciding whether a green `act` run is
 sufficient evidence for a given claim. Phases 2, 3, and 7 all target this
 runner's exact label set in their `runs-on:` — read the Lifecycle and
 Credentials sections before adding a new self-hosted job anywhere in this
 estate.
 
-**Facts later phases depend on** (Plan 06's `<output>` instruction):
+**Facts later phases depend on** (Plan 06's `<output>` instruction, extended
+by Plan 02-02 Task 3):
 
 | Fact | Value |
 |------|-------|
@@ -17,47 +18,84 @@ estate.
 | Runner group | `athena-selfhosted` (id 3), `visibility=selected` restricted to `athena-infra` only, `allows_public_repositories=true` — created live via the runners-groups API, since the org's Default group (id 1) ships `allows_public_repositories=false` and would silently refuse jobs from every repo in this estate (all four are public) |
 | Registry push target that worked from CI | `localhost:5000` (host-side — the runner is a host process against the host Docker daemon, D-17) — proven live in `heavy-selfhosted.yml`, matches Plan 02's `registry-smoke.sh` finding exactly |
 | act's local platform image | `athena/act-ubuntu-latest:act-latest` — `catthehacker/ubuntu:act-latest` (the medium tier) plus `ruby`, built locally, never pushed to a registry |
+| **Pool size** | `athena_runner_pool_size: 2` (`ansible/roles/github-runner/defaults/main.yml`) — two ephemeral JIT instances, `athena-runner@1` and `athena-runner@2`, both registered under the `athena-runner-` name prefix. See "Why a pool" below. |
+| Pinned CI toolchain | `terraform` (`athena_terraform_version`), `checkov` (`athena_checkov_version`), `awslocal` (`athena_awscli_local_version`) — D-14 golden-agent-image pins, installed by the role's toolchain block, shared across every pool instance since they're stateless CLI tools symlinked onto `/usr/local/bin` |
+
+## Why a pool (D-12)
+
+D-11 puts every job that needs `localhost:4566` — plan, apply, the
+`awslocal` verify, `terraform test` — on this self-hosted runner. With a
+single runner unit, a long `terraform apply` on `main` blocks every PR's
+`plan` job behind it purely on **runner capacity**, which is
+indistinguishable in the Actions UI from the **state-lock queuing**
+IAC-03's drill is meant to demonstrate — you could watch a PR queue and not
+be able to tell which phenomenon you were looking at. Two pool instances
+separate the two: with capacity for two jobs at once, a queued PR plan next
+to an in-flight `main` apply now queues (if it queues at all) on the S3
+state lock, not on the runner. The `athena_runner_pool_size` knob exists so
+it can be raised if a later phase needs more headroom.
 
 ## Lifecycle
 
-One job, end to end, is exactly this sequence:
+One job, end to end, on **one pool instance** (`athena-runner@N`) is exactly
+this sequence — every instance runs this same sequence independently, in
+parallel with its siblings:
 
-1. `systemctl start athena-runner` (or a restart from the loop below) runs
-   `ExecStartPre` twice: first `rm -rf {{ home }}/_work` (belt-and-braces
-   pristine-per-job guarantee beyond what `RuntimeDirectory` alone covers),
-   then `jitconfig.sh`.
-2. `jitconfig.sh` reads the registration PAT from
-   `/etc/athena-runner/github-runner-pat`, first **deregisters any stale
+1. `systemctl start athena-runner@N` (or a restart from the loop below) runs
+   `ExecStartPre` twice: first `rm -rf {{ home }}/_work-N` (belt-and-braces
+   pristine-per-job guarantee beyond what `RuntimeDirectory` alone covers,
+   scoped to this instance's own work folder so two concurrent jobs on
+   different pool instances cannot contaminate each other's checkout), then
+   `jitconfig.sh N`.
+2. `jitconfig.sh N` reads the registration PAT from
+   `/etc/athena-runner/github-runner-pat`, derives this instance's
+   registered name (`athena-runner-N`), first **deregisters any stale
    same-name runner** (a live-discovered necessity — see Troubleshooting),
    then calls `POST /orgs/AuraBit/actions/runners/generate-jitconfig` and
    writes the single-use, ~1-hour-lived response to
-   `/run/athena-runner/jitconfig.json` (mode 0600, `RuntimeDirectory`-owned
-   so it is wiped by systemd on stop).
+   `/run/athena-runner-N/jitconfig.json` (mode 0600, this instance's own
+   `RuntimeDirectory`-owned path so it is wiped by systemd on stop and never
+   visible to a sibling instance).
 3. `ExecStart` runs `run.sh --jitconfig "$(cat .../jitconfig.json)"`.
    `--jitconfig` implies `--ephemeral` — no separate `config.sh` step ever
    runs, and no reusable registration token is ever written anywhere.
-4. The runner registers, shows `online` in the organisation's runner list,
-   and listens for exactly one job.
+4. The runner registers as `athena-runner-N`, shows `online` in the
+   organisation's runner list, and listens for exactly one job.
 5. The job runs. GitHub deregisters this runner the moment the job
    completes (or fails) — this is what "ephemeral" means operationally.
-6. `run.sh` exits; systemd's `Restart=always` (5s `RestartSec`) starts the
-   unit again, and the cycle repeats from step 1 with a brand-new
-   registration and a brand-new runner id.
+6. `run.sh` exits; systemd's `Restart=always` (5s `RestartSec`) starts this
+   instance's unit again, and the cycle repeats from step 1 with a
+   brand-new registration and a brand-new runner id — independent of
+   whatever the other pool instance is doing at the time.
+
+Both instances share the same underlying runner binary installation and OS
+user home directory (`/home/athena-runner`) — only the `RuntimeDirectory`
+(JIT config) and the `_work` checkout folder are instance-isolated, per D-12's
+design. This means the runner binary's own `.runner`/`.credentials` files
+under `/home/athena-runner` reflect whichever instance most recently
+(re)registered, not a permanently-separate per-instance file; each running
+process still holds its own in-memory session once started, so this does not
+affect job execution — only a snapshot read of `.runner` between two
+concurrent restarts can transiently show the other instance's data.
+`verify-runner.sh` accounts for this: it asserts ephemerality via the same
+shared path (matching Phase 1's documented evidence path) once per pool
+instance, and asserts genuine pool-wide operation independently via the
+organisation's runners API (distinct online names, both label-carrying).
 
 **Observe each step:**
 
 ```bash
-systemctl status athena-runner                          # unit state
-journalctl -u athena-runner -f                           # live lifecycle log
+systemctl status athena-runner@1 athena-runner@2          # unit state, both instances
+journalctl -u athena-runner@1 -u athena-runner@2 -f        # live lifecycle log, interleaved
 set -a; . estate/athena-infra/.governance.env; set +a
 curl -sS -H "Authorization: Bearer $GH_RUNNER_REG_PAT" \
   -H "Accept: application/vnd.github+json" \
   "https://api.github.com/orgs/$GITHUB_OWNER/actions/runners" | jq .
-sudo cat /home/athena-runner/.runner | jq .               # this instance's own registration (id, Ephemeral, pool)
+sudo cat /home/athena-runner/.runner | jq .               # most-recently-registered instance's state (id, Ephemeral, pool)
 ```
 
-The runner `id` in both the API response and `.runner` changes after every
-completed job — that rotation **is** the observable proof of ephemeral
+The runner `id` in the API response changes after every completed job on
+either instance — that rotation **is** the observable proof of ephemeral
 behaviour this estate relies on (see "What the API does not tell you"
 below).
 
@@ -90,11 +128,12 @@ stronger source of truth than an API field that may simply be omitted.
   unit, an Ansible variable, or any file inside an estate repository, and
   every Ansible task that touches its existence is `no_log`.
 - **The fetched JIT config** is single-use, expires roughly an hour after
-  issuance, and is written to `/run/athena-runner/jitconfig.json` (mode
-  0600) immediately before every start — never cached, never reused.
-  `RuntimeDirectory=athena-runner` means systemd deletes this file on
-  every stop, independent of whether the runner process cleaned up after
-  itself.
+  issuance, and is written to `/run/athena-runner-N/jitconfig.json` (mode
+  0600, one such path per pool instance) immediately before every start —
+  never cached, never reused. `RuntimeDirectory=athena-runner-%i` means
+  systemd deletes this instance-specific file on every stop, independent of
+  whether the runner process cleaned up after itself, and never visible to
+  a sibling instance.
 - **The runner binary's own internal credential files** — `.credentials`,
   `.credentials_rsaparams` (an RSA private key used to sign the runner's
   session token requests), and `.runner` — are written by `run.sh` itself
@@ -102,12 +141,17 @@ stronger source of truth than an API field that may simply be omitted.
   directly. A live finding this plan: with the OS's default umask these
   land world-readable (0644). `UMask=0077` in the systemd unit closes this
   for every file the service process creates, from the first write, with
-  no post-hoc chmod race.
+  no post-hoc chmod race. All pool instances share the same runner-binary
+  installation directory (`/home/athena-runner`), so these three files
+  reflect whichever instance most recently (re)registered — see the
+  Lifecycle section's note on what this does and does not affect.
 - **Rotation:** the PAT is a normal fine-grained GitHub PAT — rotate it by
   minting a new one scoped identically, overwriting
   `/etc/athena-runner/github-runner-pat` (`sudo` required), and restarting
-  the unit (`sudo systemctl restart athena-runner`). No code change is
-  needed; the role never bakes the PAT's value into anything it renders.
+  every pool instance (`sudo systemctl restart athena-runner@1
+  athena-runner@2`, or loop `athena_runner_pool_size` times). No code
+  change is needed; the role never bakes the PAT's value into anything it
+  renders.
 
 ## Blast radius
 
@@ -121,6 +165,17 @@ layer cache persists in the host daemon across every ephemeral runner
 instance — `heavy-selfhosted.yml`'s second build step proves this
 concretely (a `CACHED` layer on a run that started from a brand-new
 runner registration).
+
+**Pooling multiplies this, and that is stated plainly too.** Every pool
+instance runs as the same `athena-runner` OS user, so `athena_runner_pool_size`
+instances is `athena_runner_pool_size` concurrent root-equivalent job slots,
+not one. Raising the pool size raises the number of jobs that can be
+running with that authority at the same moment — this is exactly why the
+knob defaults to the smallest value (2) that actually solves D-12's
+runner-vs-lock-queue ambiguity, rather than an arbitrarily larger number.
+The four compensating controls below bound each individual job's blast
+radius; they do not shrink as the pool grows, and neither does the
+underlying accepted risk.
 
 This risk is accepted, not ignored, and it is bounded by **four
 independent compensating controls**:
@@ -258,23 +313,24 @@ registration).
 This means one of the four Blast radius controls has a gap — treat it as
 a security incident, not a bug. First:
 ```bash
-sudo systemctl stop athena-runner   # stop taking new jobs immediately
+sudo systemctl stop athena-runner@1 athena-runner@2   # stop every instance taking new jobs immediately
 ```
 Then check which control failed: did a workflow add a PR-family trigger
 (`verify-runner.sh` would have caught this on its next run — run it now),
 did the org's fork-approval setting get reset, or did an allowlisted
-action itself do something it shouldn't have? Do not restart the unit
+action itself do something it shouldn't have? Do not restart either unit
 until the root cause is identified and closed.
 
-**Fully deregister and re-provision.**
+**Fully deregister and re-provision one pool instance** (substitute the
+instance number, e.g. `1`, throughout):
 ```bash
 set -a; . estate/athena-infra/.governance.env; set +a
-sudo systemctl stop athena-runner
-sudo systemctl disable athena-runner
+sudo systemctl stop athena-runner@1
+sudo systemctl disable athena-runner@1
 RUNNER_ID="$(curl -sS -H "Authorization: Bearer $GH_RUNNER_REG_PAT" \
   -H "Accept: application/vnd.github+json" \
   "https://api.github.com/orgs/$GITHUB_OWNER/actions/runners" \
-  | jq -r '.runners[] | select(.name=="athena-runner-01") | .id')"
+  | jq -r '.runners[] | select(.name=="athena-runner-1") | .id')"
 curl -sS -X DELETE -H "Authorization: Bearer $GH_RUNNER_REG_PAT" \
   -H "Accept: application/vnd.github+json" \
   "https://api.github.com/orgs/$GITHUB_OWNER/actions/runners/${RUNNER_ID}"
