@@ -7,6 +7,12 @@
 #   act -l -W .github/workflows/lint.yml        # list the jobs a workflow declares
 #   act push -W .github/workflows/lint.yml       # run the lint workflow's push-triggered jobs
 #
+# terraform-core-network.yml's `plan` job additionally needs localhost:4566
+# reachable from inside act's container -- see docs/runbooks/runner-ops.md's
+# "Running terraform-core-network.yml's plan job under act" section for the
+# exact --network host invocation (Plan 02-04, D-15). Its `apply` job is
+# deliberately excluded from act entirely -- same section explains why.
+#
 # See docs/runbooks/runner-ops.md's "What act does not prove" section before
 # treating a green act run as equivalent to a green run on the real
 # self-hosted runner — it deliberately is not.

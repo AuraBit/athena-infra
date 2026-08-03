@@ -247,6 +247,56 @@ acceptance criteria never accept an `act` result as proof of a gating
 behaviour — only of "the workflow file parses and this job's shell logic
 runs."
 
+## Running terraform-core-network.yml's `plan` job under act (D-15, Plan 02-04)
+
+Static jobs (`static`) run under `act` completely unchanged — no
+LocalStack, no network endpoint tricks, exactly like `lint.yml` already
+does. The `plan` job is different: it needs to reach LocalStack at
+`localhost:4566`, and `act`'s workflow container runs inside its own
+Docker network namespace by default, where `localhost` means the
+container itself, not the host. The fix is `--network host`, which makes
+the container share the host's network namespace directly — `localhost`
+inside the container then genuinely is the host's `localhost`, where
+LocalStack is actually listening (D-15's host-docker-daemon reachability
+story, same as `heavy-selfhosted.yml`'s registry access).
+
+Copy-pasteable command, run from `estate/athena-infra`:
+
+```bash
+. scripts/tf-env.sh dev   # exports this act run's AWS_* env vars into the current shell
+act pull_request \
+  -W .github/workflows/terraform-core-network.yml \
+  -j plan \
+  --network host \
+  --env AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}" \
+  --env AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}" \
+  --env AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION}"
+```
+
+This exercises `terraform init`/`terraform plan`'s shell logic and the
+git-tag module resolution against LocalStack genuinely reachable from
+inside the container — real coverage `act` can actually provide. It does
+**not** prove the job lands on this specific self-hosted runner (`act`
+does not distinguish `self-hosted` from any other label, see "What act
+does not prove" #4 above), and it does **not** exercise the sticky
+PR-comment step meaningfully (no real pull request exists locally for
+`marocchino/sticky-pull-request-comment` to comment on) — expect that step
+to either no-op or error under `act` depending on which event payload you
+feed it, and do not treat either outcome as evidence either way.
+
+**`apply` jobs are excluded from `act` by design, not by oversight.** An
+`apply` genuinely mutates the emulated AWS account — running it under
+`act` would apply real changes against LocalStack from a throwaway local
+run, with no `environment:` gate to pause it (act has no concept of a
+GitHub Environment's required-reviewer gating at all, see "What act does
+not prove" #1 above) and no concurrency-group queuing to serialize it
+against a real CI apply that might be in flight (#2 above). A green `act`
+run of the `apply` job would prove nothing about whether the *real*
+Environment-gated, concurrency-queued apply behaves correctly, while
+carrying the exact same real-mutation risk as the genuine job — worse
+coverage for equal risk. Verify `apply` only against a real merge to
+`main`.
+
 ## ARC, considered and rejected
 
 Actions Runner Controller (ARC) would host a fleet of self-hosted runners
