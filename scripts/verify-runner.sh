@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+# verify-runner.sh — CI-05, CI-06, FOUND-05 assertions for the self-hosted
+# runner and the act inner loop (Plan 06).
+#
+# Mirrors verify-governance.sh's shape: every check asserts live state (the
+# systemd unit, the organisation's runners API, the journal, the workflow
+# files on disk, a real `act` invocation) rather than trusting that the
+# Ansible role or the workflow file merely *exists*. Deliberately not using
+# `set -e` (mirrors verify-skeleton.sh/verify-governance.sh): every fallible
+# command is captured into a variable first so one failing check never
+# aborts the ones after it; scripts/verify.sh (this script's dispatcher) is
+# what turns any FAIL here into a non-zero process exit.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${SCRIPT_DIR}/.."
+ESTATE_ROOT="${REPO_ROOT}/.."
+RUNNER_USER="athena-runner"
+RUNNER_HOME="/home/athena-runner"
+EXPECTED_LABEL="athena-local"
+WORKFLOWS=(
+  "${REPO_ROOT}/.github/workflows/lint.yml"
+  "${REPO_ROOT}/.github/workflows/heavy-selfhosted.yml"
+  "${ESTATE_ROOT}/athena-app/.github/workflows/lint.yml"
+  "${ESTATE_ROOT}/athena-gitops/.github/workflows/lint.yml"
+  "${ESTATE_ROOT}/athena-docs/.github/workflows/lint.yml"
+)
+
+# GITHUB_OWNER / GH_RUNNER_REG_PAT must already be exported (see
+# docs/runbooks/github-bootstrap.md — `set -a; . estate/athena-infra/.governance.env; set +a`).
+: "${GITHUB_OWNER:?GITHUB_OWNER must be exported — see docs/runbooks/github-bootstrap.md}"
+: "${GH_RUNNER_REG_PAT:?GH_RUNNER_REG_PAT must be exported — see docs/runbooks/github-bootstrap.md}"
+
+PASS_COUNT=0
+FAIL_COUNT=0
+
+check() {
+  local name="$1" status="$2" observed="${3:-}"
+  if [ "${status}" -eq 0 ]; then
+    printf '\033[32mPASS\033[0m  %s\n' "${name}"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    printf '\033[31mFAIL\033[0m  %s\n' "${name}"
+    printf '      observed: %s\n' "${observed}"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
+gh_runner_api() {
+  curl -sS -H "Authorization: Bearer ${GH_RUNNER_REG_PAT}" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "https://api.github.com/orgs/${GITHUB_OWNER}$1"
+}
+
+# ---------------------------------------------------------------------------
+# 1. systemd unit enabled and active
+# ---------------------------------------------------------------------------
+UNIT_ENABLED="$(systemctl is-enabled athena-runner 2>/dev/null || true)"
+UNIT_ACTIVE="$(systemctl is-active athena-runner 2>/dev/null || true)"
+if [ "${UNIT_ENABLED}" = "enabled" ] && [ "${UNIT_ACTIVE}" = "active" ]; then
+  check "athena-runner.service is enabled and active" 0
+else
+  check "athena-runner.service is enabled and active" 1 \
+    "enabled=[${UNIT_ENABLED}] active=[${UNIT_ACTIVE}]"
+fi
+
+# ---------------------------------------------------------------------------
+# 2. Org reports >=1 online runner carrying the estate label, and its
+#    ephemeral flag is set. The org-level runners API omits `ephemeral` from
+#    both the list and detail endpoints for this org (live finding, this
+#    plan — the field is documented as optional in GitHub's own OpenAPI
+#    schema but consistently absent from every response observed while
+#    building this role), so ephemerality is instead read from the runner's
+#    own local `.runner` bookkeeping file, which JIT registration writes
+#    with "Ephemeral":"True" — a stronger source of truth than an API field
+#    that may simply be unset, since it comes from the runner's actual
+#    registered state rather than a list response.
+# ---------------------------------------------------------------------------
+RUNNERS_JSON="$(gh_runner_api "/actions/runners?per_page=100")"
+ONLINE_LABELED_COUNT="$(printf '%s' "${RUNNERS_JSON}" | jq --arg label "${EXPECTED_LABEL}" \
+  '[.runners[] | select(.status=="online") | select([.labels[].name] | index($label))] | length' 2>/dev/null || echo 0)"
+if [ "${ONLINE_LABELED_COUNT}" -ge 1 ] 2>/dev/null; then
+  check "organisation reports >=1 online runner carrying the '${EXPECTED_LABEL}' label" 0
+else
+  check "organisation reports >=1 online runner carrying the '${EXPECTED_LABEL}' label" 1 \
+    "online_labeled_count=[${ONLINE_LABELED_COUNT}]"
+fi
+
+RUNNER_FILE_JSON="$(sudo cat "${RUNNER_HOME}/.runner" 2>/dev/null || true)"
+RUNNER_EPHEMERAL="$(printf '%s' "${RUNNER_FILE_JSON}" | jq -r '.Ephemeral // empty' 2>/dev/null || true)"
+if [ "${RUNNER_EPHEMERAL}" = "True" ]; then
+  check "runner's own registration state (.runner) reports Ephemeral=True" 0
+else
+  check "runner's own registration state (.runner) reports Ephemeral=True" 1 \
+    "observed=[${RUNNER_EPHEMERAL}] (raw: ${RUNNER_FILE_JSON:0:200})"
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Runner OS user exists and is in the docker group
+# ---------------------------------------------------------------------------
+RUNNER_GROUPS="$(id -nG "${RUNNER_USER}" 2>/dev/null || true)"
+if printf '%s' "${RUNNER_GROUPS}" | grep -qw docker; then
+  check "OS user '${RUNNER_USER}' exists and is in the docker group" 0
+else
+  check "OS user '${RUNNER_USER}' exists and is in the docker group" 1 \
+    "id -nG ${RUNNER_USER} => [${RUNNER_GROUPS}]"
+fi
+
+# ---------------------------------------------------------------------------
+# 4. No world-readable file under the runner home contains the registration
+#    PAT, and the journal carries no token-shaped string. Reads the PAT
+#    value only into this shell's own memory for a local grep — it is never
+#    echoed, logged, or written anywhere.
+# ---------------------------------------------------------------------------
+PAT_LEAK_FILES="$(sudo find "${RUNNER_HOME}" -perm -o=r -type f -exec grep -l "${GH_RUNNER_REG_PAT}" {} \; 2>/dev/null || true)"
+if [ -z "${PAT_LEAK_FILES}" ]; then
+  check "no world-readable file under ${RUNNER_HOME} contains the registration PAT" 0
+else
+  check "no world-readable file under ${RUNNER_HOME} contains the registration PAT" 1 \
+    "leaked_in=[${PAT_LEAK_FILES}]"
+fi
+
+JOURNAL_TOKEN_COUNT="$(sudo journalctl -u athena-runner --no-pager 2>/dev/null | grep -Ec 'ghp_|github_pat_' || true)"
+if [ "${JOURNAL_TOKEN_COUNT}" = "0" ]; then
+  check "athena-runner journal contains no token-shaped string (ghp_/github_pat_)" 0
+else
+  check "athena-runner journal contains no token-shaped string (ghp_/github_pat_)" 1 \
+    "match_count=[${JOURNAL_TOKEN_COUNT}]"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. heavy-selfhosted.yml declares no PR-family trigger, and its job carries
+#    the protected-branch condition
+# ---------------------------------------------------------------------------
+HEAVY_WF="${REPO_ROOT}/.github/workflows/heavy-selfhosted.yml"
+PR_TRIGGER_COUNT="$(grep -cE 'pull_request' "${HEAVY_WF}" 2>/dev/null || true)"
+if [ "${PR_TRIGGER_COUNT}" = "0" ]; then
+  check "heavy-selfhosted.yml declares no pull_request-family trigger" 0
+else
+  check "heavy-selfhosted.yml declares no pull_request-family trigger" 1 \
+    "match_count=[${PR_TRIGGER_COUNT}]"
+fi
+
+HAS_BRANCH_GUARD="$(grep -cE "refs/heads/main" "${HEAVY_WF}" 2>/dev/null || true)"
+if [ "${HAS_BRANCH_GUARD}" -ge 1 ] 2>/dev/null; then
+  check "heavy-selfhosted.yml's job carries a protected-branch (refs/heads/main) condition" 0
+else
+  check "heavy-selfhosted.yml's job carries a protected-branch (refs/heads/main) condition" 1 \
+    "match_count=[${HAS_BRANCH_GUARD}]"
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Across every workflow file in this repo, the count of non-local `uses:`
+#    references not terminating in a full-length hex SHA is zero
+# ---------------------------------------------------------------------------
+UNPINNED_COUNT=0
+UNPINNED_LIST=()
+for wf in "${WORKFLOWS[@]}"; do
+  if [ -f "${wf}" ]; then
+    while IFS= read -r line; do
+      [ -z "${line}" ] && continue
+      UNPINNED_COUNT=$((UNPINNED_COUNT + 1))
+      UNPINNED_LIST+=("${wf#"${ESTATE_ROOT}"/}:${line}")
+    done < <(grep -oE 'uses: *[^ ]+' "${wf}" | sed 's/^uses: *//' | grep -v '^\./' | grep -vE '@[0-9a-f]{40}$' || true)
+  fi
+done
+if [ "${UNPINNED_COUNT}" -eq 0 ]; then
+  check "every non-local 'uses:' reference across this estate's workflows is SHA-pinned" 0
+else
+  check "every non-local 'uses:' reference across this estate's workflows is SHA-pinned" 1 \
+    "unpinned=[${UNPINNED_LIST[*]}]"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. act itself: version probe, and it can list the lint workflow's jobs
+# ---------------------------------------------------------------------------
+ACT_VERSION_OUT="$(act --version 2>&1)"
+ACT_VERSION_RC=$?
+if [ "${ACT_VERSION_RC}" -eq 0 ]; then
+  check "act --version succeeds (${ACT_VERSION_OUT})" 0
+else
+  check "act --version succeeds" 1 "rc=${ACT_VERSION_RC} output=[${ACT_VERSION_OUT}]"
+fi
+
+ACT_LIST_OUT="$(cd "${REPO_ROOT}" && act -l -W .github/workflows/lint.yml 2>&1)"
+if printf '%s' "${ACT_LIST_OUT}" | grep -qw lint; then
+  check "act -l -W lint.yml lists the lint job (proves act can parse this repo's workflows)" 0
+else
+  check "act -l -W lint.yml lists the lint job" 1 "output=[${ACT_LIST_OUT}]"
+fi
+
+# ---------------------------------------------------------------------------
+# 8. FOUND-05's actual requirement: the lint workflow genuinely runs to
+#    completion under act. Ensures the custom local image .actrc points at
+#    exists first (see .actrc's own comment — the stock medium image lacks
+#    `ruby`, which this job's YAML check depends on).
+# ---------------------------------------------------------------------------
+if ! docker image inspect athena/act-ubuntu-latest:act-latest >/dev/null 2>&1; then
+  docker build -t athena/act-ubuntu-latest:act-latest - >/dev/null 2>&1 <<'DOCKERFILE'
+FROM catthehacker/ubuntu:act-latest
+RUN apt-get update && apt-get install -y --no-install-recommends ruby \
+    && rm -rf /var/lib/apt/lists/*
+DOCKERFILE
+fi
+
+ACT_RUN_OUT="$(cd "${REPO_ROOT}" && act push -W .github/workflows/lint.yml 2>&1)"
+ACT_RUN_RC=$?
+if [ "${ACT_RUN_RC}" -eq 0 ]; then
+  check "act push -W lint.yml exits 0 (FOUND-05)" 0
+else
+  check "act push -W lint.yml exits 0 (FOUND-05)" 1 \
+    "rc=${ACT_RUN_RC} (tail) $(printf '%s' "${ACT_RUN_OUT}" | tail -5 | tr '\n' ' ')"
+fi
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+echo
+printf '[verify-runner] %s passed, %s failed, %s total.\n' \
+  "${PASS_COUNT}" "${FAIL_COUNT}" "$((PASS_COUNT + FAIL_COUNT))"
+
+if [ "${FAIL_COUNT}" -gt 0 ]; then
+  exit 1
+fi
+exit 0

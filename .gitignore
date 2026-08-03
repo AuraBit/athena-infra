@@ -35,6 +35,10 @@ localstack/.localstack.env
 # Runner / CI scratch space (Plan 06).
 _work/
 
+# act's local artifact/cache server paths (.actrc — Plan 06, Task 3).
+.act-artifacts/
+.act-cache/
+
 # Editor/OS noise.
 .DS_Store
 *.swp
