@@ -40,12 +40,21 @@ account.
 The **LocalStack Open-Source Program** application (public repo, non-commercial
 use, OSI licence — this project qualifies) would upgrade the account to the
 free **Ultimate** tier and move the four `code+docs-only` rows below to
-`emulated`. It is **not yet submitted**: the application requires a public
-repository, and this project's repos go public in Plan 04. The application is
-tracked as a deferred, non-blocking follow-up to be submitted immediately
-after Plan 04 lands — the roadmap does not wait on approval (RESEARCH.md Open
-Question 2 records no published approval SLA), exactly as this plan and
-CONTEXT.md D-15 already specify.
+`emulated`. It is **not yet submitted**. The eligibility precondition — four
+public, MIT-licensed repos under `github.com/AuraBit` — was independently
+re-confirmed live (`gh repo view` on all four, plus a `LICENSE` first-line
+check) and is fully met; nothing technical blocks submission. As of
+**2026-08-03**, submission is **deliberately deferred by explicit
+project-owner decision**, not by any unmet precondition: the reasoning is that
+a reviewer sees a stronger, more substantial project the more of the estate is
+visibly built out on `github.com/AuraBit` before the form is filed, so the
+project owner chose to wait rather than file at the earliest technically
+possible moment. There is no fixed trigger date — the trigger is "enough of
+the estate visibly built out on GitHub," assessed by the project owner, not a
+calendar date or a specific plan number. The roadmap does not wait on approval
+regardless (RESEARCH.md Open Question 2 records no published approval SLA);
+this deferral only delays when that clock starts, which remains an open,
+tracked item (see STATE.md Blockers/Concerns).
 
 **How to update this table when approval lands:** re-run
 `scripts/verify-localstack.sh` after upgrading the account — its coverage-table
@@ -65,7 +74,7 @@ exactly these four values (see this file's `<output>` record in
 | s3 | Phase 2 IAC-01/IAC-02 (Terraform S3 state backend); Phase 7 DR-01 (Velero backups) | Hobby (free, account + token) | emulated | — |
 | iam | Phase 2 IAC-01 (governance-stack roles/policies); Phase 6 IAC-01 (EKS/Karpenter IAM) | Hobby | emulated | — |
 | ec2 | Phase 2 IAC-01 (Core/Network stack: VPC, subnets, security groups, IP reservations) | Hobby | emulated | — |
-| rds | Phase 6 IAC-01 (Data/Storage stack: Postgres) | Ultimate (paid on Hobby — confirmed live: `describe-db-instances` returns a license-gated `InternalFailure`) | code+docs-only | Terraform for `aws_db_instance` ships production-grade and would apply cleanly against real AWS; against this Hobby-tier account the API is license-gated, so it is never claimed as apply-verified locally. The running app talks to a plain containerized Postgres instead (see README "State locality" and project `.claude/CLAUDE.md`'s Postgres row). Moves to `emulated` if the OSS Program application (submitted after Plan 04) is approved. |
+| rds | Phase 6 IAC-01 (Data/Storage stack: Postgres) | Ultimate (paid on Hobby — confirmed live: `describe-db-instances` returns a license-gated `InternalFailure`) | code+docs-only | Terraform for `aws_db_instance` ships production-grade and would apply cleanly against real AWS; against this Hobby-tier account the API is license-gated, so it is never claimed as apply-verified locally. The running app talks to a plain containerized Postgres instead (see README "State locality" and project `.claude/CLAUDE.md`'s Postgres row). Moves to `emulated` if the OSS Program application — deliberately deferred as of 2026-08-03 pending a more built-out public estate, not yet submitted (see "Tier reality" above) — is later submitted and approved. |
 | elasticache | Phase 6 IAC-01 (Data/Storage stack: Redis/Valkey sessions) | Ultimate | code+docs-only | Same license-gated `InternalFailure` confirmed live for `describe-cache-clusters`. The app's session store runs as a plain containerized Valkey instance instead. Same OSS Program approval path as `rds`. |
 | cloudfront | Phase 6 IAC-01 (media CDN, `media-<env>.athena.net`) | Ultimate | code+docs-only | Confirmed live: `list-distributions` returns the same license-gated `InternalFailure`. CloudFront's edge-CDN behavior has no meaningful local stand-in regardless of tier (no real edge network to emulate locally) — this row is expected to stay `code+docs-only` even after OSS Program approval, and that expectation is recorded here rather than left implicit. |
 | eks | Phase 6 IAC-01/IAC-06 (Application/Compute stack: cluster + node pools) | Ultimate | code+docs-only | Confirmed live: `list-clusters` returns the same license-gated `InternalFailure`. k3d already stands in for the actually-running cluster (CONTEXT.md D-14); this Terraform resource exists to prove the IaC authoring pattern, not to stand up a real control plane locally — the same caveat `.claude/CLAUDE.md` already applies to Karpenter (real EC2 Fleet/Spot APIs have no free local emulation at the fidelity Karpenter's scheduler logic needs), `code+docs-only` regardless of LocalStack tier. |
