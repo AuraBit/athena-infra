@@ -63,3 +63,15 @@ output "private_data_route_table_ids" {
   description = "IDs of dev's private-data route tables, one per AZ. None carry a 0.0.0.0/0 route."
   value       = module.core_network.private_data_route_table_ids
 }
+
+# --- Plan 02-03, Task 3: S3 gateway VPC endpoint ----------------------------
+
+output "s3_vpc_endpoint_id" {
+  description = "ID of dev's S3 gateway VPC endpoint."
+  value       = module.core_network.s3_vpc_endpoint_id
+}
+
+output "s3_vpc_endpoint_prefix_list_id" {
+  description = "Prefix list id dev's S3 gateway endpoint injects into its attached route tables."
+  value       = module.core_network.s3_vpc_endpoint_prefix_list_id
+}
