@@ -139,14 +139,52 @@ version's own provider documentation. D-02's requirement (GitHub merge queue
 on `athena-app`'s `main`, and nowhere else) is fully Terraform-managed by
 Plan 05's `protections.tf`; **no `gh api` script is needed for this gap.**
 
-**No other provider coverage gap has been identified as of this plan.** The
-next most likely candidate, per RESEARCH.md's own risk assessment, is an
-org-level Actions policy field (e.g. a granular allowlist option) lagging
-the provider's `github_actions_organization_permissions`/
-`github_actions_organization_workflow_permissions` resources — Plan 05 owns
-that territory and will update this section if it hits one.
+**Plan 05 finding: fork-PR-approval-for-outside-collaborators has NO API at
+all — not a provider gap, a total API gap.** D-08/CI-06 requires "require
+approval for fork pull requests from all outside collaborators." This
+setting (GitHub Settings -> Actions -> General -> "Fork pull request
+workflows from outside collaborators", configured per repository) was
+probed directly and exhaustively this plan:
 
-**The general escape-hatch procedure, for whatever gap does surface next:**
+- Every plausible REST path was tried against both org- and repo-scoped
+  `actions/permissions/*` endpoints — each returned a generic 404 with
+  `documentation_url: https://docs.github.com/rest` (GitHub's signature for
+  "this route does not exist," distinct from the specific,
+  doc-linked 404/409 responses the real neighbouring endpoints return).
+- GraphQL schema introspection on both the `Organization` and `Repository`
+  types was queried for every field containing "fork" — none relate to
+  workflow-approval policy.
+
+Because no API exists — not "the `integrations/github` provider doesn't
+expose it," but "there is nothing for any provider, or any `gh api` script,
+to call" — this is **not closable by a companion script**, unlike the
+general escape-hatch procedure below assumes is always possible. It is
+recorded as a genuine, permanent manual step: for each of the four
+repositories, Settings -> Actions -> General -> "Fork pull request
+workflows from outside collaborators" -> "Require approval for all outside
+collaborators" -> Save. `scripts/verify-governance.sh` reports this item as
+`MANUAL`, not a fabricated `PASS` — see `governance/actions-security.tf`'s
+own comment for the full evidence trail. Re-check this specific gap
+whenever GitHub's REST/GraphQL API changelog is reviewed; if an endpoint is
+ever added, adopt it into `actions-security.tf` the same way the
+merge-queue gap above was retired once the provider caught up.
+
+**Plan 05 finding: `GET /repos/{owner}/{repo}/codeowners/errors` 404s
+unless `ref` is a fully-qualified `refs/heads/<branch>`.** Calling this
+endpoint with `?ref=main` (or no `ref` at all) returns a generic 404 even
+when a valid `CODEOWNERS` file exists on the default branch; calling it
+with `?ref=refs/heads/main` returns the expected `{"errors": []}` body.
+This is an endpoint-usage quirk, not a provider or Terraform gap (this
+endpoint isn't Terraform-managed at all — it's a read-only validation
+check), but it cost real debugging time this plan and is recorded here so
+the next script that calls it doesn't rediscover it the hard way.
+`scripts/verify-governance.sh` already uses the fully-qualified form.
+
+**No other provider coverage gap has been identified as of this plan.**
+
+**The general escape-hatch procedure, for whatever gap does surface next
+(where an API DOES exist but the Terraform provider doesn't expose it —
+distinct from the total-API-gap case documented above):**
 
 1. Confirm it's a genuine coverage gap (the field/behaviour exists in the
    GitHub API/UI but has no corresponding Terraform provider resource or
