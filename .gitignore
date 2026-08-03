@@ -20,6 +20,10 @@ crash.*.log
 # LocalStack auth token / env file (D-15) — never committed.
 localstack/.localstack.env
 
+# GitHub governance credentials (GITHUB_TOKEN, GITHUB_OWNER, GH_RUNNER_REG_PAT)
+# — Plan 04's D-09 bootstrap secrets, never committed.
+.governance.env
+
 # Any raw key material. The mkcert root CA private key in particular must
 # never leave the host CAROOT directory — see the plan's threat model (T-01-01).
 *.pem
