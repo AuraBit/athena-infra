@@ -45,6 +45,14 @@ services:
       # exposure, documented in docs/localstack-service-coverage.md).
       - /var/run/docker.sock:/var/run/docker.sock
       - localstack-data:/var/lib/localstack
+      # State-bucket bootstrap (Plan 02-01, Task 1; CONTEXT.md D-18). Mounted
+      # read-only into ready.d specifically, not boot.d or start.d: ready.d is
+      # the one init-hook stage LocalStack guarantees runs only after the S3
+      # provider is actually serving requests (boot.d/start.d fire earlier
+      # and would race the first s3api head-bucket call on a cold start).
+      # Read-only so no in-container process can rewrite its own bootstrap
+      # script (T-02-02).
+      - ./init/ready.d/create-state-buckets.sh:/etc/localstack/init/ready.d/create-state-buckets.sh:ro
     healthcheck:
       test:
         [
