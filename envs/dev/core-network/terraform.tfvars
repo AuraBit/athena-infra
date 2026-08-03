@@ -1,6 +1,13 @@
 # terraform.tfvars — envs/dev/core-network (Plan 02-01, Task 1; CONTEXT.md
 # D-21 non-overlapping supernet plan: dev 10.0.0.0/16, stg 10.1.0.0/16,
 # prod 10.2.0.0/16).
+#
+# Plan 02-03 adds availability_zones/subnet_newbits/single_nat_gateway to
+# modules/core-network, all defaulted for dev (three us-east-1 AZs, /20
+# subnets, one shared NAT) — this file intentionally does not gain new
+# entries for them; see envs/dev/core-network/main.tf's module block for
+# why. stg/prod will need explicit values here once their own env roots
+# exist (Plan 02-08+).
 name_prefix = "athena"
 environment = "dev"
 vpc_cidr    = "10.0.0.0/16"

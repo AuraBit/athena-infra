@@ -12,6 +12,10 @@ governance/**/*.tfstate.backup
 **/.terraform.lock.hcl
 *.tfplan
 *.tfplan.json
+# Plan files created via `terraform plan -out=tfplan` (the exact filename
+# every Phase 2 stack's task text uses) have no extension, so *.tfplan above
+# never matches them — this bare-name entry closes that gap.
+tfplan
 crash.log
 crash.*.log
 *.auto.tfvars

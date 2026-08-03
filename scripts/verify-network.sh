@@ -28,6 +28,11 @@
 # gateway ids, route table ids, vpc endpoint id, flow-logs bucket, baseline
 # security group ids. Each new output gets its own assertion block below,
 # following the same non-vacuous / identity / read-only shape as vpc_id.
+#
+# Multi-valued outputs (subnet ids, NAT ids, route table ids, ...) are always
+# compared as UNORDERED SETS (sort both sides) — the describe API makes no
+# ordering guarantee for a multi-id response, so a sequence comparison would
+# make this verifier flip on API response order rather than on reality.
 
 set -uo pipefail
 
@@ -159,6 +164,72 @@ else
     else
       check "${env_name}: vpc_id (${VPC_ID}) confirmed real via ec2 describe-vpcs" 1 \
         "expected=[${VPC_ID}] observed=[${DESCRIBE_VPC_ID}]"
+    fi
+
+    # -------------------------------------------------------------------
+    # Subnets (Plan 02-03, Task 1): for each of the three tiers, assert the
+    # subnet id set matches ec2 describe-subnets as an UNORDERED SET, then
+    # assert each returned subnet's CIDR matches what Terraform's state
+    # records and that it hangs off this env's VPC (not some other one).
+    #
+    # `terraform show -json` (no plan-file argument) reports the current
+    # STATE as JSON, not a plan — this is where each subnet's planned CIDR
+    # is read from, since there is no dedicated verification-only output
+    # for it. Resources are collected recursively across root_module and
+    # any nested child_modules so this works regardless of module nesting.
+    # -------------------------------------------------------------------
+    STATE_JSON="$(cd "${dir}" && terraform show -json 2>&1)"
+    STATE_EXIT=$?
+    if [ "${STATE_EXIT}" -ne 0 ]; then
+      check "${env_name}: terraform show -json succeeds (needed for subnet CIDR assertions)" 1 \
+        "exit=${STATE_EXIT} output=[${STATE_JSON:0:200}]"
+    else
+      ALL_RESOURCES="$(printf '%s' "${STATE_JSON}" | jq -c '[.values.root_module | .. | .resources? // empty | .[]?]' 2>/dev/null)"
+
+      for tier_pair in "public:public_subnet_ids" "private-app:private_app_subnet_ids" "private-data:private_data_subnet_ids"; do
+        tier="${tier_pair%%:*}"
+        out_key="${tier_pair##*:}"
+
+        EXPECTED_IDS_JSON="$(printf '%s' "${OUTPUT_JSON}" | jq -c --arg k "${out_key}" '.[$k].value // []' 2>/dev/null)"
+        EXPECTED_COUNT="$(printf '%s' "${EXPECTED_IDS_JSON}" | jq 'length' 2>/dev/null)"
+
+        if [ -z "${EXPECTED_COUNT}" ] || [ "${EXPECTED_COUNT}" -eq 0 ] 2>/dev/null; then
+          check "${env_name}: ${out_key} output is present and non-empty" 1 \
+            "terraform output -json has no non-empty .${out_key}.value"
+          continue
+        fi
+
+        EXPECTED_IDS_SORTED="$(printf '%s' "${EXPECTED_IDS_JSON}" | jq -r '.[]' 2>/dev/null | sort)"
+        EXPECTED_IDS_SPACE="$(printf '%s' "${EXPECTED_IDS_JSON}" | jq -r '.[]' 2>/dev/null | tr '\n' ' ')"
+
+        DESCRIBE_JSON="$(aws_ls ec2 describe-subnets --subnet-ids ${EXPECTED_IDS_SPACE} --output json)"
+        OBSERVED_IDS_SORTED="$(printf '%s' "${DESCRIBE_JSON}" | jq -r '.Subnets[].SubnetId' 2>/dev/null | sort)"
+
+        if [ -n "${OBSERVED_IDS_SORTED}" ] && [ "${EXPECTED_IDS_SORTED}" = "${OBSERVED_IDS_SORTED}" ]; then
+          check "${env_name}: ${tier} subnet id set (${EXPECTED_COUNT}) matches ec2 describe-subnets, unordered" 0
+        else
+          check "${env_name}: ${tier} subnet id set matches ec2 describe-subnets, unordered" 1 \
+            "expected=[${EXPECTED_IDS_SORTED}] observed=[${OBSERVED_IDS_SORTED}]"
+        fi
+
+        MISMATCH=""
+        for sid in $(printf '%s' "${EXPECTED_IDS_JSON}" | jq -r '.[]' 2>/dev/null); do
+          PLANNED_CIDR="$(printf '%s' "${ALL_RESOURCES}" | jq -r --arg id "${sid}" '.[] | select(.type=="aws_subnet" and .values.id==$id) | .values.cidr_block // empty' 2>/dev/null | head -1)"
+          OBSERVED_CIDR="$(printf '%s' "${DESCRIBE_JSON}" | jq -r --arg id "${sid}" '.Subnets[] | select(.SubnetId==$id) | .CidrBlock // empty' 2>/dev/null)"
+          OBSERVED_VPC="$(printf '%s' "${DESCRIBE_JSON}" | jq -r --arg id "${sid}" '.Subnets[] | select(.SubnetId==$id) | .VpcId // empty' 2>/dev/null)"
+
+          if [ -z "${PLANNED_CIDR}" ] || [ "${PLANNED_CIDR}" != "${OBSERVED_CIDR}" ] || [ "${OBSERVED_VPC}" != "${VPC_ID}" ]; then
+            MISMATCH="${MISMATCH} ${sid}(planned_cidr=${PLANNED_CIDR:-<none>} observed_cidr=${OBSERVED_CIDR:-<none>} observed_vpc=${OBSERVED_VPC:-<none>} expected_vpc=${VPC_ID})"
+          fi
+        done
+
+        if [ -z "${MISMATCH}" ]; then
+          check "${env_name}: ${tier} subnet CIDRs match Terraform state and hang off ${VPC_ID}" 0
+        else
+          check "${env_name}: ${tier} subnet CIDRs match Terraform state and hang off ${VPC_ID}" 1 \
+            "mismatches:${MISMATCH}"
+        fi
+      done
     fi
   done
 fi
