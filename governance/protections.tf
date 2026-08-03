@@ -45,6 +45,30 @@ locals {
 # a merge queue (D-02). required_check.context = "lint" matches the job id
 # in athena-app/.github/workflows/lint.yml exactly — a mismatch here is the
 # specific failure mode that makes main permanently unmergeable.
+#
+# VERIFIED LIVE FINDING (Task 3's protected-merge walkthrough, real PRs
+# #1/#2, this plan): athena-ci-bot's own PR review does NOT satisfy
+# require_code_owner_review on this repo — GitHub's reviewDecision stayed
+# REVIEW_REQUIRED even after the bot approved, because the bot is not a
+# member of any CODEOWNERS team (teams.tf only adds developer_username to
+# team memberships; Plan 04's territory, not edited by this plan). What
+# DOES unblock the merge is bypass_actors above: the bot merging directly
+# is exempt from ruleset enforcement entirely (the same grant that lets it
+# push straight to main), independent of whether its review satisfied the
+# review gate. This was proven by isolation on athena-docs in the same
+# walkthrough (require_code_owner_review=false there): the identical bot
+# review DID flip reviewDecision to APPROVED and mergeStateStatus to CLEAN,
+# and a normal, non-bypass merge by the human author succeeded — so the
+# review-count mechanism itself works correctly; only the code-owner
+# sub-requirement is unreachable by the bot's review specifically on this
+# repo. D-03's flow ("bot approves PRs") is therefore real in practice as
+# "human opens PR, bot reviews for the audit trail, bot merges via bypass"
+# on athena-app — not "bot's review satisfies the code-owner gate and a
+# human clicks merge." Making the bot's review itself satisfy
+# require_code_owner_review would require adding athena-ci-bot to
+# team-platform (or all six teams) in teams.tf — a real, recommended
+# follow-up for whichever plan next touches that file, not done here per
+# this plan's explicit file-ownership boundary (Plan 04 owns teams.tf).
 resource "github_repository_ruleset" "app_main" {
   name        = "protect-main"
   repository  = github_repository.athena_app.name
