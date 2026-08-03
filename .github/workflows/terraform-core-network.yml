@@ -1,0 +1,476 @@
+name: terraform-core-network
+
+# D-01's plan-on-PR / apply-on-merge pipeline for the Core/Network
+# Terraform stack -- the pattern Phase 6's Data/Storage and
+# Application/Compute stacks, and Phase 7's monorepo CI, copy verbatim per
+# this plan's own objective. Every job below restates its own
+# `permissions:` block (workflow-level stays read-only; D-08's per-job
+# elevation discipline -- only `plan` adds `pull-requests: write`, and only
+# for its own sticky-comment step). Every third-party `uses:` is pinned to
+# an immutable 40-character commit SHA, resolved via
+# `gh api /repos/<owner>/<repo>/git/ref/tags/<tag>` against the real
+# repository (recorded in this file's introducing commit message) -- the
+# org enforces SHA pinning organisation-wide (actions-security.tf), so a
+# mutable tag here is a hard CI failure, not a style nit.
+#
+# Trigger shape: `pull_request` (no branch filter -- every PR gets static
+# analysis and, for a trusted same-repo branch, a plan) and `push` limited
+# to `main` (apply only ever runs post-merge, D-01).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # Single source of truth for the Terraform version every job in this
+  # workflow installs. MUST equal lint.yml's TF_VERSION and
+  # ansible/roles/github-runner/defaults/main.yml's
+  # athena_terraform_version -- Plan 02-02's own acceptance criteria
+  # already asserts those two agree with each other; this workflow is the
+  # third place that same literal has to match, so a static job
+  # (fmt/validate) and a self-hosted job (plan/apply/verify) never disagree
+  # about which Terraform version produced a given result.
+  TF_VERSION: "1.15.8"
+
+jobs:
+  # ---------------------------------------------------------------------
+  # detect-changes -- D-08: which env directories did this PR/push touch?
+  # stg and prod filters are declared now even though envs/stg/,
+  # envs/prod/ arrive in Plan 02-08+ -- a filter matching nothing is
+  # correct and harmless (dorny/paths-filter simply reports `false` for
+  # it), whereas retrofitting the filter list later, after plan/apply/gate
+  # already assume a fixed filter set, is where mistakes get made.
+  # ---------------------------------------------------------------------
+  detect-changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # dorny/paths-filter reads the PR diff via the REST API on pull_request events
+    outputs:
+      changed_envs: ${{ steps.envs-only.outputs.result }}
+      modules_changed: ${{ steps.filter.outputs.modules }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        id: filter
+        with:
+          # No `base:` override, deliberately: the action's own default
+          # already does the right thing for both trigger types this
+          # workflow declares. On pull_request events `base:` is ignored
+          # entirely -- the action diffs against the PR's own base via the
+          # REST API. On push events `base:` defaults to this repository's
+          # default branch (main), which IS the branch this workflow's
+          # `push:` trigger is scoped to -- exactly the "most recent
+          # commit before this push" comparison D-08's apply-side matrix
+          # needs, with zero extra configuration.
+          filters: |
+            dev: 'envs/dev/core-network/**'
+            stg: 'envs/stg/core-network/**'
+            prod: 'envs/prod/core-network/**'
+            modules: 'modules/core-network/**'
+
+      - name: build the env-only matrix array
+        # steps.filter.outputs.changes is a JSON array of EVERY matched
+        # filter name, including "modules" -- the plan/apply matrix must
+        # only ever contain dev/stg/prod, so this step strips "modules"
+        # out into its own output rather than feeding "changes" straight
+        # into strategy.matrix.env (which would try to plan/apply a
+        # non-existent "modules" environment).
+        id: envs-only
+        run: |
+          set -euo pipefail
+          RESULT="$(echo '${{ steps.filter.outputs.changes }}' | jq -c '[.[] | select(. != "modules")]')"
+          echo "changed envs (modules filter excluded): ${RESULT}"
+          echo "result=${RESULT}" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------
+  # static -- fmt / validate / Checkov / skip-lint. Always runs, on every
+  # trigger, unconditionally. Needs no localhost:4566 reachability at all
+  # (fmt/validate/Checkov are pure source-level checks; the module's git::
+  # source resolves over an ordinary public-repo HTTPS clone, which
+  # ubuntu-latest can already reach) -- exactly why D-11 places this job on
+  # the hosted runner rather than the self-hosted one.
+  # ---------------------------------------------------------------------
+  static:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt -check -recursive (envs/ and modules/)
+        run: terraform fmt -check -recursive envs/ modules/
+
+      - name: terraform validate -- every existing env root and the module itself
+        run: |
+          set -euo pipefail
+          for dir in modules/core-network envs/*/core-network; do
+            [ -d "${dir}" ] || continue
+            echo "::group::terraform validate -- ${dir}"
+            (cd "${dir}" && terraform init -backend=false -input=false && terraform validate)
+            echo "::endgroup::"
+          done
+
+      - name: install checkov (POL-04, pinned to the version ansible/roles/github-runner/defaults/main.yml installs on self-hosted)
+        run: pip install "checkov==3.3.9"
+
+      - name: checkov (POL-04 hard-blocking gate; D-24)
+        # No --soft-fail, no --hard-fail-on, no severity flag of any kind
+        # on this invocation -- .checkov.yaml's own header comment explains
+        # at length why that absence is deliberate. quiet/compact come from
+        # that config file, not a CLI flag, so a clean run here is
+        # genuinely silent (no output at all) -- expected, not a sign
+        # nothing ran; the guard step immediately below is what proves
+        # something genuinely was scanned.
+        run: checkov -d modules/core-network -d envs --config-file .checkov.yaml
+
+      - name: checkov vacuous-scan guard (POL-04 backstop truth)
+        # A checkov invocation that inspects zero resources, or that hits a
+        # parse error, exits 0 -- empirically proven and recorded in Plan
+        # 02-04 Task 2's commit message. The step above passing is
+        # therefore NOT proof it inspected anything at all; this step
+        # independently re-parses checkov's own JSON summary (checkov
+        # emits one JSON document PER `-d` root on a multi-directory
+        # invocation, concatenated back-to-back rather than as a single
+        # array -- the parser below walks the stream document by document
+        # rather than assuming a single top-level object) and fails the
+        # job if either vacuous condition holds anywhere in either
+        # document.
+        run: |
+          set -euo pipefail
+          checkov -d modules/core-network -d envs --config-file .checkov.yaml -o json --quiet > checkov-summary.json
+          python3 - <<'PY'
+          import json, sys
+
+          dec = json.JSONDecoder()
+          txt = open("checkov-summary.json").read()
+          idx = 0
+          docs = 0
+          total_resources = 0
+          total_parse_errors = 0
+          while idx < len(txt):
+              rest = txt[idx:].lstrip()
+              if not rest:
+                  break
+              obj, end = dec.raw_decode(rest)
+              docs += 1
+              summary = obj.get("summary", {})
+              total_resources += summary.get("resource_count", 0)
+              total_parse_errors += summary.get("parsing_errors", 0)
+              idx += (len(txt[idx:]) - len(rest)) + end
+
+          print(f"checkov produced {docs} report(s); {total_resources} total resource(s) scanned; {total_parse_errors} parsing error(s)")
+          if docs == 0:
+              print("::error::checkov produced no JSON report at all -- nothing to trust")
+              sys.exit(1)
+          if total_parse_errors > 0:
+              print("::error::checkov reported one or more parsing errors -- a broken scan must not report green")
+              sys.exit(1)
+          if total_resources == 0:
+              print("::error::checkov scanned zero resources -- a vacuous scan must not report green")
+              sys.exit(1)
+          PY
+
+      - name: verify-checkov-skips.sh (D-24 auditable-exception lint)
+        run: bash scripts/verify-checkov-skips.sh
+
+  # ---------------------------------------------------------------------
+  # plan -- self-hosted, matrix over detect-changes' env array. PR-only,
+  # same-repo-branch only (ADR-0006 / D-10). Declares NO `environment:`
+  # (a gated Environment would pause every stg/prod plan on every pull
+  # request, which is not what D-31 gates -- only the apply job's
+  # Environment binding is meant to pause anything) and NO `concurrency:`
+  # (a plan is non-mutating; its only real constraint is runner-pool
+  # capacity, which Plan 02-02 sized to exactly this purpose).
+  # ---------------------------------------------------------------------
+  plan:
+    needs: detect-changes
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    # Belt-and-braces, deliberately redundant with the trigger list's own
+    # implicit restriction (this job only ever matrixes on `pull_request`)
+    # -- heavy-selfhosted.yml uses this exact same redundant-`if:` style,
+    # and CI-06 (amended by ADR-0006 to admit same-repo-branch pull
+    # requests specifically) is a security control, not a convenience
+    # check; a control with a single point of failure is a control that
+    # eventually fails silently the day someone edits this file without
+    # re-reading this comment.
+    runs-on: [self-hosted, linux, x64, athena-local]
+    strategy:
+      fail-fast: false
+      matrix:
+        env: ${{ fromJSON(needs.detect-changes.outputs.changed_envs) }}
+    permissions:
+      contents: read
+      pull-requests: write # marocchino/sticky-pull-request-comment, this job only
+    defaults:
+      run:
+        working-directory: envs/${{ matrix.env }}/core-network
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: export ${{ matrix.env }}'s LocalStack credentials
+        # This job declares no `environment:` (see the job-level comment
+        # above), so it cannot read GitHub Environment-scoped variables the
+        # way the `apply` job below does -- there is no environment bound
+        # to read them FROM. These three values are non-secret by
+        # construction (D-16: LocalStack derives which simulated account a
+        # request lands in from the access key alone, not from any real
+        # authorisation) and are the exact literals scripts/tf-env.sh
+        # already exports for local runs -- reusing that same source of
+        # truth here rather than inventing a second one.
+        run: |
+          set -euo pipefail
+          case "${{ matrix.env }}" in
+            dev)  ACCOUNT_ID="111111111111" ;;
+            stg)  ACCOUNT_ID="222222222222" ;;
+            prod) ACCOUNT_ID="333333333333" ;;
+            *) echo "unknown env '${{ matrix.env }}'" >&2; exit 1 ;;
+          esac
+          {
+            echo "AWS_ACCESS_KEY_ID=${ACCOUNT_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${ACCOUNT_ID}"
+            echo "AWS_DEFAULT_REGION=us-east-1"
+          } >> "$GITHUB_ENV"
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        run: terraform init -input=false
+
+      - name: terraform plan
+        id: plan
+        run: |
+          set -euo pipefail
+          terraform plan -out=tfplan -input=false -no-color | tee plan-output.txt
+
+      - name: write plan summary to the job summary
+        run: |
+          {
+            echo "### terraform plan -- ${{ matrix.env }}"
+            echo '```'
+            cat plan-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: post/update the sticky per-environment plan comment (D-02)
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        with:
+          header: core-network-${{ matrix.env }}
+          path: envs/${{ matrix.env }}/core-network/plan-output.txt
+          message: |
+            ### Terraform plan -- `${{ matrix.env }}` (core-network)
+
+            <details><summary>Show plan</summary>
+
+            ```
+            {{{content}}}
+            ```
+
+            </details>
+
+  # ---------------------------------------------------------------------
+  # apply -- self-hosted, matrix over the same env array, push-to-main
+  # only. `environment: ${{ matrix.env }}` is what makes stg/prod pause for
+  # the human reviewer Plan 02-06 configures, while dev (zero protection
+  # rules) proceeds unattended. `concurrency:` is declared INSIDE this job
+  # block only -- see the comment directly above it for why that placement
+  # is load-bearing, not stylistic.
+  # ---------------------------------------------------------------------
+  apply:
+    needs: [detect-changes, static]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, athena-local]
+    strategy:
+      fail-fast: false
+      matrix:
+        env: ${{ fromJSON(needs.detect-changes.outputs.changed_envs) }}
+    environment: ${{ matrix.env }}
+    # Declared inside this job's block ONLY -- never at workflow level. A
+    # workflow-scoped group would make a pull request's `plan` job for an
+    # environment sit queued behind an in-progress `apply` for that same
+    # environment, defeating the entire point of Plan 02-02's runner-pool
+    # sizing (two independent pool instances specifically so PR plans stay
+    # responsive while a main apply is in flight). cancel-in-progress:
+    # false is IAC-03's literal requirement -- two applies targeting the
+    # same stack+env QUEUE, they never race and never cancel each other.
+    concurrency:
+      group: terraform-core-${{ matrix.env }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: envs/${{ matrix.env }}/core-network
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: export ${{ matrix.env }}'s LocalStack credentials from this Environment's variables (D-13)
+        # Unlike the `plan` job above, this job DOES bind
+        # `environment: ${{ matrix.env }}`, so `vars.*` here resolves
+        # against that specific GitHub Environment's own variables --
+        # genuinely per-environment-scoped, the mechanism D-13 describes.
+        # dev's three variables were provisioned directly via `gh variable
+        # set --env dev` ahead of this workflow landing (Plan 02-04); Plan
+        # 02-06 formalises this same environment + variable set via
+        # governance/environments.tf, bringing it under Terraform without
+        # changing any value these already hold.
+        run: |
+          set -euo pipefail
+          : "${AWS_ACCESS_KEY_ID:?vars.AWS_ACCESS_KEY_ID is not set for the '${{ matrix.env }}' GitHub Environment -- see docs/runbooks/runner-ops.md}"
+          {
+            echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
+            echo "AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}"
+          } >> "$GITHUB_ENV"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ vars.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        run: terraform init -input=false
+
+      - name: terraform plan (fresh re-plan, D-05 -- never the PR's saved plan artifact)
+        # State may have moved since the pull request opened (another
+        # env's merge, a stale-lock recovery, anything) -- Terraform would
+        # reject a stale plan serial anyway. The PR's plan was the review
+        # artifact a human looked at; THIS plan, computed fresh right
+        # before apply, is the execution artifact that actually gets
+        # applied -- and its summary goes into the job log below so an
+        # auditor can see what was actually applied even though no human
+        # approved this exact plan (only the PR-time one).
+        run: |
+          set -euo pipefail
+          terraform plan -out=tfplan -input=false -no-color | tee plan-output.txt
+
+      - name: write the FRESH plan's summary to the job summary (Pitfall 4 -- what was applied vs. what was reviewed)
+        run: |
+          {
+            echo "### terraform apply -- ${{ matrix.env }} (fresh re-plan applied below)"
+            echo '```'
+            cat plan-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: terraform apply
+        run: terraform apply -input=false tfplan
+
+      - name: verify-network.sh (IAC-04 -- apply green + resource real, independently confirmed, same job as the apply)
+        # Living in this same job is load-bearing: it inherits the
+        # concurrency group above, so no other apply for this environment
+        # can interleave between the apply step and this check. This step
+        # is not allowed to fail softly -- its failure fails the whole job,
+        # which is what makes it a gate rather than a report.
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/verify-network.sh ${{ matrix.env }}
+
+  # ---------------------------------------------------------------------
+  # gate -- the single stable-named required status check main's ruleset
+  # points at (D-32; Plan 02-06 wires that ruleset). A required check
+  # naming a job that has never reported once makes main permanently
+  # unmergeable -- the exact warning governance/protections.tf's own header
+  # comment already states for `lint`, repeated here verbatim in spirit
+  # because it applies identically to this job.
+  #
+  # `if: always()` so this job runs regardless of any upstream failure --
+  # it is the thing that DECIDES pass/fail, not something that should be
+  # skipped just because something upstream already went red.
+  # ---------------------------------------------------------------------
+  gate:
+    needs: [detect-changes, static, plan]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: evaluate aggregate result
+        run: |
+          set -euo pipefail
+
+          DETECT_RESULT="${{ needs.detect-changes.result }}"
+          STATIC_RESULT="${{ needs.static.result }}"
+          PLAN_RESULT="${{ needs.plan.result }}"
+          EVENT="${{ github.event_name }}"
+          CHANGED_ENVS='${{ needs.detect-changes.outputs.changed_envs }}'
+
+          echo "detect-changes.result = ${DETECT_RESULT}"
+          echo "static.result         = ${STATIC_RESULT}"
+          echo "plan.result           = ${PLAN_RESULT}"
+          echo "event_name            = ${EVENT}"
+          echo "changed_envs           = ${CHANGED_ENVS}"
+          echo
+
+          FAIL=0
+
+          if [ "${DETECT_RESULT}" = "failure" ] || [ "${DETECT_RESULT}" = "cancelled" ]; then
+            echo "FAIL: detect-changes did not succeed (result=${DETECT_RESULT})"
+            FAIL=1
+          fi
+
+          # static must be success, UNCONDITIONALLY -- no skip is ever
+          # legitimate for this job, it has no `if:` of its own and always
+          # runs.
+          if [ "${STATIC_RESULT}" != "success" ]; then
+            echo "FAIL: static must be success, was '${STATIC_RESULT}'"
+            FAIL=1
+          fi
+
+          if [ "${PLAN_RESULT}" = "failure" ] || [ "${PLAN_RESULT}" = "cancelled" ]; then
+            echo "FAIL: plan reported '${PLAN_RESULT}'"
+            FAIL=1
+          elif [ "${PLAN_RESULT}" = "skipped" ]; then
+            # A skip is legitimate in exactly two cases: this run is a push
+            # (plan never runs on push by design -- apply owns push), or
+            # detect-changes genuinely found nothing to plan (a
+            # modules-only PR, or a PR touching an env this repo doesn't
+            # have yet). Any OTHER skip -- most notably a pull request that
+            # DID touch an env directory but whose head repo failed the
+            # same-repo-branch check (a fork PR, ADR-0006) -- is a leg that
+            # should have run and did not, and that is a gate failure, not
+            # a silently-accepted skip. This is deliberate: a fork PR
+            # touching envs/dev has nothing for a human to review (no plan
+            # ever ran), so a green gate for it would be exactly the
+            # silent hole Pitfall 3 warns about.
+            if [ "${EVENT}" = "push" ]; then
+              echo "OK: plan is intentionally skipped on push events (apply owns push, not plan)"
+            elif [ "${CHANGED_ENVS}" = "[]" ]; then
+              echo "OK: plan is intentionally skipped -- detect-changes reported an empty environment array (e.g. a modules-only PR)"
+            else
+              echo "FAIL: plan was skipped but detect-changes reported changed_envs=${CHANGED_ENVS} -- a leg that should have run did not (see ADR-0006 if this is a fork PR)"
+              FAIL=1
+            fi
+          fi
+
+          if [ "${FAIL}" -eq 1 ]; then
+            echo
+            echo "gate: FAIL"
+            exit 1
+          fi
+
+          echo
+          echo "gate: PASS"
