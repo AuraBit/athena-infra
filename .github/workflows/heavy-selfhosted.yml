@@ -1,0 +1,111 @@
+name: heavy-selfhosted
+
+# CI-05 (a self-hosted runner handles heavy jobs) and the job-level half of
+# CI-06 (self-hosted jobs run only on push to a protected branch) proven
+# together (Plan 06, Task 2; CONTEXT.md D-08/D-17).
+#
+# Triggers deliberately: `push` limited to `main`, plus `workflow_dispatch`
+# for manual runs. This workflow declares no PR-family trigger of any kind
+# — a self-hosted runner attached to public repositories with a
+# proposed-code trigger is the pwn-request path: an outside contributor's
+# change would execute on the developer's own workstation, which holds
+# their SSH keys, browser profile, and a root-equivalent Docker socket
+# (docker-group membership, D-17). The org-level fork-approval policy
+# (Plan 05 user_setup) is one control and this trigger restriction is the
+# second; both are required because either alone can be misconfigured.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  heavy:
+    runs-on: [self-hosted, linux, x64, athena-local]
+
+    # Belt-and-braces alongside the trigger list above — deliberately
+    # redundant. CI-06 is a security control, and a control with a single
+    # point of failure is a control that eventually fails silently the day
+    # someone adds a trigger to this file without re-reading this comment.
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: print runner identity (evidence this job landed on the local machine)
+        run: |
+          set -euo pipefail
+          echo "runner name:   ${RUNNER_NAME}"
+          echo "runner labels: self-hosted, linux, x64, athena-local (matches ansible/roles/github-runner/defaults/main.yml)"
+          echo "hostname:      $(hostname)"
+          echo "runner OS:     ${RUNNER_OS}"
+          id
+
+      - name: build image (host BuildKit, first run — expect a full build)
+        env:
+          # Host-side push target — the runner is a host process talking to
+          # the host Docker daemon (D-17), so it uses the same address the
+          # host does (localhost:5000), confirmed live in Plan 02's summary
+          # — NOT the in-cluster reference (athena-registry:5000), which
+          # only resolves from inside a cluster's containerd.
+          IMAGE: localhost:5000/athena/ci-smoke:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cat > Dockerfile.ci-smoke <<'EOF'
+          FROM busybox:1.36
+          LABEL athena.ci-smoke="true"
+          ARG BUILD_MARKER=unset
+          RUN echo "built by heavy-selfhosted at ${BUILD_MARKER}" > /ci-smoke.txt
+          CMD ["cat", "/ci-smoke.txt"]
+          EOF
+          docker buildx build \
+            --build-arg BUILD_MARKER="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --tag "${IMAGE}" \
+            --load \
+            --file Dockerfile.ci-smoke \
+            .
+
+      - name: push to the local registry (FOUND-03's CI half)
+        env:
+          IMAGE: localhost:5000/athena/ci-smoke:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker push "${IMAGE}"
+          CATALOG="$(curl -sS http://localhost:5000/v2/_catalog)"
+          echo "catalog: ${CATALOG}"
+          if [[ "${CATALOG}" != *"athena/ci-smoke"* ]]; then
+            echo "registry catalog does not list athena/ci-smoke after push" >&2
+            exit 1
+          fi
+          echo "confirmed: registry catalog lists athena/ci-smoke"
+
+      - name: rebuild (second run — expect cached layers, proving D-17's persistent-cache tradeoff)
+        env:
+          IMAGE: localhost:5000/athena/ci-smoke:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          BUILD_LOG="$(docker buildx build \
+            --build-arg BUILD_MARKER="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --tag "${IMAGE}" \
+            --load \
+            --file Dockerfile.ci-smoke \
+            --progress=plain \
+            . 2>&1)"
+          echo "${BUILD_LOG}"
+          if ! echo "${BUILD_LOG}" | grep -qi "CACHED"; then
+            echo "second build did not report any CACHED layers — the host-daemon cache-persistence claim (D-17) is unproven this run" >&2
+            exit 1
+          fi
+          echo "confirmed: second build reused cached layers from the host Docker daemon"
+
+      - name: clean up the local tag (so a re-run genuinely rebuilds)
+        if: always()
+        env:
+          IMAGE: localhost:5000/athena/ci-smoke:${{ github.sha }}
+        run: |
+          docker rmi "${IMAGE}" >/dev/null 2>&1 || true
+          rm -f Dockerfile.ci-smoke

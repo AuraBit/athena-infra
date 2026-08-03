@@ -96,6 +96,32 @@ install_docker() {
     fi
   fi
 
+  # docker-buildx (Plan 06, Task 2 — live finding): unlike Docker's official
+  # convenience installer, Arch's `docker` package does NOT bundle the
+  # buildx CLI plugin — `DOCKER_BUILDKIT=1 docker build` hard-fails with
+  # "buildx component is missing" until this plugin is present. CLAUDE.md's
+  # "BuildKit is Docker's default builder since Docker 23+" holds for
+  # Docker's own installer, not for this distro's packaging, so this step
+  # closes that gap explicitly rather than leaving CI's BuildKit build
+  # (heavy-selfhosted.yml) to discover it cold.
+  if require_cmd docker && docker buildx version >/dev/null 2>&1; then
+    ok "docker-buildx already installed ($(docker buildx version))"
+  else
+    if ! sudo_available; then
+      fail "docker-buildx install requires sudo."
+      PROVISION_FAILED=1
+      return 1
+    fi
+    info "Installing docker-buildx from the Arch extra repo..."
+    sudo pacman -S --needed --noconfirm docker-buildx
+    if ! docker buildx version >/dev/null 2>&1; then
+      fail "docker buildx version did not succeed after installing docker-buildx."
+      PROVISION_FAILED=1
+      return 1
+    fi
+    ok "docker-buildx installed: $(docker buildx version)"
+  fi
+
   # Group membership: idempotent check before usermod.
   if id -nG "$USER" 2>/dev/null | grep -qw docker; then
     ok "User '$USER' is already in the docker group"
@@ -340,6 +366,7 @@ print_summary() {
   echo
   info "Toolchain version summary:"
   printf '  %-10s %s\n' "docker"    "$(_version_of docker --version)"
+  printf '  %-10s %s\n' "buildx"    "$(_version_of docker buildx version)"
   printf '  %-10s %s\n' "k3d"       "$(_version_of k3d version)"
   printf '  %-10s %s\n' "mkcert"    "$(_version_of mkcert -version)"
   printf '  %-10s %s\n' "helm"      "$(_version_of helm version --short)"
