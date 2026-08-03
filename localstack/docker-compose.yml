@@ -1,0 +1,52 @@
+# docker-compose.yml — LocalStack as a HOST-level service (Plan 03, Task 1;
+# CONTEXT.md D-15).
+#
+# LocalStack IS the AWS account for this project: it lives outside both k3d
+# clusters and outlives them, deliberately, exactly as a real AWS account is
+# not a child resource of any one workload cluster. Putting this in a cluster
+# would invert that relationship, so it is provisioned as a systemd-managed
+# host service (see ../ansible/roles/bootstrap-localstack) driving this
+# compose file, not a Kubernetes manifest.
+#
+# Reachability (D-15): the host, CI, and Terraform all reach this at
+# localhost:4566. Cluster pods reach it at host.k3d.internal:4566 — a
+# hostname k3d resolves to the host automatically, requiring no extra
+# networking config on this file's side.
+services:
+  localstack:
+    image: localstack/localstack:2026.07.1
+    container_name: athena-localstack
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4566:4566"
+    environment:
+      - DEBUG=0
+      # Persisted here (not hardcoded) so a compose-level default can never
+      # accidentally become a committed placeholder token (T-01-10).
+      - PERSISTENCE=0
+    env_file:
+      # Real token lives here, git-ignored (see ../.gitignore and
+      # localstack.env.example for the template). Never given an inline
+      # value or a compose-level default.
+      - .localstack.env
+    volumes:
+      # LocalStack needs the host Docker socket to spawn per-service
+      # containers for some emulated services (T-01-11 — accepted local-only
+      # exposure, documented in docs/localstack-service-coverage.md).
+      - /var/run/docker.sock:/var/run/docker.sock
+      - localstack-data:/var/lib/localstack
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "-sf",
+          "http://localhost:4566/_localstack/health",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+volumes:
+  localstack-data:

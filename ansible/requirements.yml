@@ -1,0 +1,15 @@
+---
+# requirements.yml — Ansible collection dependencies for this repo's roles.
+#
+# community.docker is used exclusively by the bootstrap-localstack role
+# (Plan 03) for docker-compose lifecycle management, giving the role a real
+# idempotency story (docker_compose_v2 reports changed=0 on a no-op re-run)
+# instead of shelling out to `docker compose` directly. Pinned per
+# RESEARCH.md's Package Legitimacy Audit (official community-namespace
+# collection, verdict OK) and Environment Availability table (5.2.1 current
+# on Galaxy at execution time).
+#
+# Install with: ansible-galaxy collection install -r ansible/requirements.yml
+collections:
+  - name: community.docker
+    version: "5.2.1"

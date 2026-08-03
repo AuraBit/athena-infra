@@ -1,0 +1,18 @@
+---
+# localstack.yml — applies the bootstrap-localstack role (LocalStack as a
+# host-level, systemd-managed docker-compose service, D-15). Localhost-only,
+# mirrors dns.yml's shape.
+#
+# Usage: ansible-galaxy collection install -r ansible/requirements.yml
+#        ansible-playbook ansible/localstack.yml
+#
+# This is also the world-rebuild runbook's rebuild step: re-running this
+# playbook after a LocalStack restart brings the compose project back up
+# (idempotently, via community.docker) and re-renders/re-enables the
+# systemd unit — see docs/runbooks/world-rebuild.md.
+- name: Bootstrap LocalStack as the host-level AWS account emulator
+  hosts: localhost
+  connection: local
+  become: false
+  roles:
+    - bootstrap-localstack

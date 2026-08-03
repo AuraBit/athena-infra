@@ -1,0 +1,10 @@
+---
+# Handlers for the bootstrap-localstack role (Plan 03, Task 1). Mirrors
+# bootstrap-dns's handler shape: notified only when the rendered unit
+# content actually changes, restarting the service to pick up the new unit.
+- name: Restart localstack unit
+  become: true
+  ansible.builtin.systemd_service:
+    name: localstack
+    daemon_reload: true
+    state: restarted

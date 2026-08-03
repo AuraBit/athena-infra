@@ -1,0 +1,23 @@
+[Unit]
+# Managed by the bootstrap-localstack Ansible role (Plan 03, Task 1;
+# CONTEXT.md D-15). LocalStack is the AWS account for this project — it
+# lives outside both k3d clusters and outlives them, so it is a host-level
+# systemd unit driving docker compose, not a Kubernetes workload.
+Description=Athena LocalStack (host-level AWS account emulator)
+Documentation=https://docs.localstack.cloud
+After=docker.service
+Requires=docker.service
+
+[Service]
+# `docker compose up -d` starts detached containers and exits; RemainAfterExit
+# keeps systemd reporting this unit active while those containers run.
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory={{ athena_localstack_compose_dir }}
+ExecStart=/usr/bin/docker compose -f {{ athena_localstack_compose_dir }}/docker-compose.yml --project-directory {{ athena_localstack_compose_dir }} up -d
+ExecStop=/usr/bin/docker compose -f {{ athena_localstack_compose_dir }}/docker-compose.yml --project-directory {{ athena_localstack_compose_dir }} down
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

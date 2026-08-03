@@ -1,0 +1,94 @@
+---
+# bootstrap-localstack role — provisions LocalStack as a host-level,
+# systemd-managed docker-compose service (Plan 03, Task 1; CONTEXT.md D-15).
+#
+# LocalStack is the AWS account for this project: it lives outside both k3d
+# clusters and outlives them (see ../../../localstack/docker-compose.yml's
+# header comment for the full framing). This role's job is narrow and
+# specific:
+#   1. Refuse to proceed on a missing/empty auth token (RESEARCH.md Pitfall 4
+#      — a token-less container answers health checks while quietly
+#      rejecting almost every real service call, which is worse than a
+#      clean, loud failure here).
+#   2. Bring the compose project up via community.docker's docker_compose_v2
+#      module (not a shelled-out `docker compose` command) so this task
+#      itself reports accurate changed/unchanged state — the idempotency
+#      story that lets docs/runbooks/world-rebuild.md treat "re-run this
+#      playbook" as the one-command recovery step.
+#   3. Render and enable a systemd unit so LocalStack also survives a host
+#      reboot without a human remembering to bring it back.
+#   4. Block until the health endpoint reports ready before handing control
+#      back to the playbook, so a caller never races a not-yet-ready
+#      LocalStack.
+
+- name: Resolve the localstack/ directory this role manages
+  ansible.builtin.set_fact:
+    athena_localstack_dir: "{{ (playbook_dir + '/../localstack') | realpath }}"
+
+- name: Stat the LocalStack env file
+  ansible.builtin.stat:
+    path: "{{ athena_localstack_dir }}/.localstack.env"
+  register: athena_localstack_env_stat
+
+- name: Fail loudly if the env file is missing
+  ansible.builtin.fail:
+    msg: >-
+      estate/athena-infra/localstack/.localstack.env does not exist. This is
+      the user_setup step (LocalStack account + auth token): sign up at
+      https://app.localstack.cloud, copy Account -> Auth Token, and write it
+      into a copy of localstack.env.example named .localstack.env in this
+      directory before re-running this playbook. See RESEARCH.md Pitfall 4
+      for why a token-less container is worse than this loud failure.
+  when: not athena_localstack_env_stat.stat.exists
+
+- name: Check LOCALSTACK_AUTH_TOKEN is present and non-empty
+  ansible.builtin.command:
+    cmd: grep -Eq '^LOCALSTACK_AUTH_TOKEN=.+$' "{{ athena_localstack_dir }}/.localstack.env"
+  register: athena_localstack_token_check
+  changed_when: false
+  failed_when: false
+
+- name: Fail loudly if LOCALSTACK_AUTH_TOKEN has no value
+  ansible.builtin.fail:
+    msg: >-
+      estate/athena-infra/localstack/.localstack.env exists but
+      LOCALSTACK_AUTH_TOKEN has no value (or the line is missing). This is
+      the user_setup step (LocalStack account + auth token) — see
+      localstack.env.example for where to obtain a real token.
+  when: athena_localstack_token_check.rc != 0
+
+- name: Bring the LocalStack compose project up (community.docker, real idempotency)
+  community.docker.docker_compose_v2:
+    project_src: "{{ athena_localstack_dir }}"
+    state: present
+  register: athena_localstack_compose
+
+- name: Render the systemd unit for boot-persistence
+  become: true
+  ansible.builtin.template:
+    src: localstack.service.j2
+    dest: /etc/systemd/system/localstack.service
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    athena_localstack_compose_dir: "{{ athena_localstack_dir }}"
+  notify: Restart localstack unit
+
+- name: Enable and start the localstack systemd unit
+  become: true
+  ansible.builtin.systemd_service:
+    name: localstack
+    daemon_reload: true
+    enabled: true
+    state: started
+
+- name: Wait for the LocalStack health endpoint to report ready
+  ansible.builtin.uri:
+    url: http://localhost:4566/_localstack/health
+    status_code: 200
+    return_content: true
+  register: athena_localstack_health
+  until: "'services' in (athena_localstack_health.content | default(''))"
+  retries: 12
+  delay: 5
