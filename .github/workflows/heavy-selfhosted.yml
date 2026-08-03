@@ -1,8 +1,8 @@
 name: heavy-selfhosted
 
 # CI-05 (a self-hosted runner handles heavy jobs) and the job-level half of
-# CI-06 (self-hosted jobs run only on push to a protected branch) proven
-# together (Plan 06, Task 2; CONTEXT.md D-08/D-17).
+# CI-06 (self-hosted jobs run only in trusted contexts) proven together
+# (Plan 06, Task 2; CONTEXT.md D-08/D-17).
 #
 # Triggers deliberately: `push` limited to `main`, plus `workflow_dispatch`
 # for manual runs. This workflow declares no PR-family trigger of any kind
@@ -13,6 +13,16 @@ name: heavy-selfhosted
 # (docker-group membership, D-17). The org-level fork-approval policy
 # (Plan 05 user_setup) is one control and this trigger restriction is the
 # second; both are required because either alone can be misconfigured.
+#
+# ADR-0006 (Plan 02-04) amends CI-06's estate-wide wording from
+# "protected-branch pushes only" to "trusted contexts only" — same-repo-
+# branch pull requests may now reach a self-hosted job elsewhere in this
+# estate (terraform-core-network.yml's `plan` job), guarded per-job by
+# `github.event.pull_request.head.repo.full_name == github.repository`.
+# This workflow's OWN triggers are deliberately untouched by that
+# amendment: nothing here needs pull-request-time self-hosted execution
+# (image builds run fine push-only), so it stays on the stricter,
+# original leg of CI-06 rather than picking up the new one for no reason.
 on:
   push:
     branches: [main]
