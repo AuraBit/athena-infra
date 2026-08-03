@@ -1,0 +1,239 @@
+---
+# tasks/main.yml — github-runner role (Plan 06, Task 1; CONTEXT.md D-16/D-17,
+# RESEARCH.md Pattern 4). Provisions an ephemeral, org-registered,
+# JIT-config-authenticated self-hosted GitHub Actions runner as a systemd
+# service. Mirrors bootstrap-dns/bootstrap-localstack's task-naming,
+# become-usage, template-placement, and handler-notification conventions.
+
+# ---------------------------------------------------------------------------
+# 1. Registration credential — assert only, never read its contents into a
+#    variable that could reach the play recap or the journal (RESEARCH.md
+#    Pattern 4; Security Domain "Runner registration token leakage" row).
+# ---------------------------------------------------------------------------
+- name: Stat the runner registration PAT file
+  become: true
+  ansible.builtin.stat:
+    path: "{{ athena_runner_pat_file }}"
+  register: athena_runner_pat_stat
+  no_log: true
+
+- name: Fail loudly if the PAT file does not exist
+  ansible.builtin.fail:
+    msg: >-
+      {{ athena_runner_pat_file }} does not exist. This is the user_setup
+      step: mint a fine-grained PAT on the athena-ci-bot account scoped to
+      manage_runners:org only (Settings -> Developer settings -> PAT), then
+      write its value into this path as a root-readable file outside every
+      estate repository, e.g.:
+      sudo install -d -m 0750 -o root -g root /etc/athena-runner &&
+      printf '%s' "$GH_RUNNER_REG_PAT" | sudo tee {{ athena_runner_pat_file }}
+      >/dev/null && sudo chmod 0400 {{ athena_runner_pat_file }}
+      — then re-run this playbook.
+  when: not athena_runner_pat_stat.stat.exists
+
+- name: Fail loudly if the PAT file is empty
+  ansible.builtin.fail:
+    msg: "{{ athena_runner_pat_file }} exists but is 0 bytes — no PAT value present."
+  when: athena_runner_pat_stat.stat.exists and athena_runner_pat_stat.stat.size == 0
+
+- name: Fail loudly if the PAT file is world-readable
+  ansible.builtin.fail:
+    msg: >-
+      {{ athena_runner_pat_file }} is world-readable (mode
+      {{ athena_runner_pat_stat.stat.mode }}) — a leaked manage_runners PAT
+      lets an attacker register their own runner into the org (RESEARCH.md
+      Security Domain, T-01-29). Tighten it (chmod 0440, owned by
+      root:{{ athena_runner_user }}) before re-running this playbook.
+  when: >-
+    athena_runner_pat_stat.stat.exists and
+    athena_runner_pat_stat.stat.size > 0 and
+    (athena_runner_pat_stat.stat.mode[-1] in ['4', '5', '6', '7'])
+
+# ---------------------------------------------------------------------------
+# 2. Dedicated unprivileged OS user, added to docker (D-17: host Docker
+#    daemon, not DinD — the cost is that docker-group membership is
+#    root-equivalent on this host; stated plainly here and in
+#    docs/runbooks/runner-ops.md's Blast radius section, not left implicit).
+# ---------------------------------------------------------------------------
+- name: Create the athena-runner group
+  become: true
+  ansible.builtin.group:
+    name: "{{ athena_runner_user }}"
+    system: true
+    state: present
+
+- name: Create the dedicated athena-runner OS user
+  become: true
+  ansible.builtin.user:
+    name: "{{ athena_runner_user }}"
+    group: "{{ athena_runner_user }}"
+    groups: docker
+    append: true
+    system: true
+    home: "{{ athena_runner_home }}"
+    create_home: true
+    shell: /usr/sbin/nologin
+    comment: "Athena ephemeral self-hosted GitHub Actions runner (Plan 06) — docker-group member, root-equivalent on this host per D-17"
+    state: present
+
+# Tighten the PAT file's *containing directory* group ownership too — a
+# 0440 file is unreachable if its parent directory isn't traversable by the
+# runner user's group (live finding, this plan: /etc/athena-runner shipped
+# 0750 root:root from its user_setup creation, so athena-runner could not
+# even stat() the file inside it, let alone read it, until this task set
+# the directory's group as well as the file's).
+- name: Ensure the PAT file's directory is traversable by the runner user's group
+  become: true
+  ansible.builtin.file:
+    path: "{{ athena_runner_pat_file | dirname }}"
+    owner: root
+    group: "{{ athena_runner_user }}"
+    mode: "0750"
+
+# Tighten the PAT file's group ownership now that the runner group exists,
+# so the runner process (User=athena-runner in the systemd unit) can read
+# it without it ever being world-readable. Metadata-only change — this task
+# never reads the file's contents.
+- name: Ensure the PAT file is owned root:{{ athena_runner_user }}, mode 0440
+  become: true
+  ansible.builtin.file:
+    path: "{{ athena_runner_pat_file }}"
+    owner: root
+    group: "{{ athena_runner_user }}"
+    mode: "0440"
+
+# ---------------------------------------------------------------------------
+# 3. Runner binary — pinned, checksum-verified, idempotent (skips the
+#    download+unpack block entirely once the version marker matches).
+# ---------------------------------------------------------------------------
+- name: Check the installed runner version marker
+  become: true
+  ansible.builtin.stat:
+    path: "{{ athena_runner_home }}/.athena-runner-version"
+  register: athena_runner_version_marker
+
+- name: Read the installed version, if any
+  become: true
+  ansible.builtin.slurp:
+    src: "{{ athena_runner_home }}/.athena-runner-version"
+  register: athena_runner_installed_version_raw
+  when: athena_runner_version_marker.stat.exists
+
+- name: Set the installed-version fact
+  ansible.builtin.set_fact:
+    athena_runner_installed_version: >-
+      {{ (athena_runner_installed_version_raw.content | b64decode | trim)
+         if athena_runner_version_marker.stat.exists else '' }}
+
+- name: Download, verify, and unpack the pinned runner tarball (only when the version differs)
+  when: athena_runner_installed_version != athena_runner_version
+  block:
+    - name: Download the runner tarball, verifying its checksum
+      ansible.builtin.get_url:
+        url: "{{ athena_runner_download_url }}"
+        dest: "/tmp/actions-runner-linux-x64-{{ athena_runner_version }}.tar.gz"
+        checksum: "sha256:{{ athena_runner_checksum_sha256 }}"
+        mode: "0644"
+
+    - name: Unpack the runner tarball into the runner home
+      become: true
+      ansible.builtin.unarchive:
+        src: "/tmp/actions-runner-linux-x64-{{ athena_runner_version }}.tar.gz"
+        dest: "{{ athena_runner_home }}"
+        remote_src: true
+        owner: "{{ athena_runner_user }}"
+        group: "{{ athena_runner_user }}"
+
+    # NOTE (live finding, this plan): bin/installdependencies.sh ships
+    # Debian/Ubuntu-only branches (/etc/debian_version, /etc/redhat-release,
+    # SUSE's ID_LIKE=suse) and has no Arch Linux path — it exits non-zero on
+    # this host. The runner's actual shared-library dependencies (libstdc++,
+    # libgcc_s, glibc) are already current on Arch and resolve cleanly
+    # (verified live: `ldd bin/Runner.Listener` shows every dependency
+    # found; `./run.sh --version` succeeds with no installdependencies.sh
+    # run at all) — so this step is a version probe proving the binary
+    # actually runs, deliberately skipping the incompatible installer
+    # rather than papering over its failure with `|| true`.
+    - name: Verify the runner binary runs and reports the pinned version
+      become: true
+      become_user: "{{ athena_runner_user }}"
+      ansible.builtin.command:
+        cmd: "{{ athena_runner_home }}/run.sh --version"
+      register: athena_runner_version_check
+      changed_when: false
+
+    - name: Fail if the runner binary does not report the pinned version
+      ansible.builtin.fail:
+        msg: "Expected runner version {{ athena_runner_version }}, got: {{ athena_runner_version_check.stdout }}"
+      when: athena_runner_version not in athena_runner_version_check.stdout
+
+    - name: Record the installed version marker
+      become: true
+      ansible.builtin.copy:
+        dest: "{{ athena_runner_home }}/.athena-runner-version"
+        content: "{{ athena_runner_version }}\n"
+        owner: "{{ athena_runner_user }}"
+        group: "{{ athena_runner_user }}"
+        mode: "0644"
+
+    - name: Remove the downloaded tarball
+      ansible.builtin.file:
+        path: "/tmp/actions-runner-linux-x64-{{ athena_runner_version }}.tar.gz"
+        state: absent
+
+# ---------------------------------------------------------------------------
+# 4. jitconfig.sh — the per-start credential fetch (RESEARCH.md Pattern 4).
+# ---------------------------------------------------------------------------
+- name: Render jitconfig.sh into the runner home
+  become: true
+  ansible.builtin.template:
+    src: jitconfig.sh.j2
+    dest: "{{ athena_runner_home }}/jitconfig.sh"
+    owner: "{{ athena_runner_user }}"
+    group: "{{ athena_runner_user }}"
+    mode: "0750"
+  notify: Restart athena-runner unit
+
+# ---------------------------------------------------------------------------
+# 5. systemd unit — ExecStartPre JIT fetch, Restart=always restart loop.
+# ---------------------------------------------------------------------------
+- name: Render the athena-runner systemd unit
+  become: true
+  ansible.builtin.template:
+    src: athena-runner.service.j2
+    dest: /etc/systemd/system/athena-runner.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart athena-runner unit
+
+- name: Reload systemd, enable and start athena-runner
+  become: true
+  ansible.builtin.systemd_service:
+    name: athena-runner
+    daemon_reload: true
+    enabled: true
+    state: started
+
+# ---------------------------------------------------------------------------
+# 6. Wait for the organisation to report an online runner with the
+#    configured label — proves the whole chain worked end to end, not just
+#    that the systemd unit reports "active". Reads GH_RUNNER_REG_PAT from
+#    the ansible-playbook process's own environment (sourced from
+#    .governance.env by the caller before invoking this playbook, same
+#    convention as governance/imports.sh's TF_VAR_github_token) rather than
+#    an Ansible variable, so the token never appears in a play recap.
+# ---------------------------------------------------------------------------
+- name: Wait for the organisation to report an online runner carrying the estate label
+  ansible.builtin.shell:
+    cmd: >-
+      curl -sS -H "Authorization: Bearer ${GH_RUNNER_REG_PAT}"
+      -H "Accept: application/vnd.github+json"
+      "https://api.github.com/orgs/{{ athena_runner_org }}/actions/runners"
+      | jq '[.runners[] | select(.status=="online") | select([.labels[].name] | index("athena-local"))] | length'
+  register: athena_runner_online_count
+  changed_when: false
+  no_log: true
+  until: athena_runner_online_count.stdout | trim | int >= 1
+  retries: 24
+  delay: 5

@@ -2,7 +2,7 @@
 # bootstrap-host.sh — idempotent Arch Linux host toolchain provisioning for the
 # Athena local estate (Plan 01, Task 1).
 #
-# Provisions exactly four things, in this order, and verifies each before
+# Provisions exactly five things, in this order, and verifies each before
 # moving to the next:
 #   1. Docker Engine   (host daemon — NOT Podman/DinD; see athena-infra README
 #                        and 01-RESEARCH.md Pitfall 2 / CONTEXT.md D-17)
@@ -10,6 +10,8 @@
 #   3. mkcert v1.4.4   (installs the root CA into the system + NSS/browser
 #                        trust stores via `mkcert -install`)
 #   4. Helm v4.2.3     (replaces any existing Helm v3 on PATH)
+#   5. act v0.2.89     (Plan 06, Task 1; FOUND-05 — fast local inner loop for
+#                        the workflows the self-hosted runner also executes)
 #
 # Safe to run twice: every step checks the desired end state first and no-ops
 # when already met. Requires an interactive terminal with sudo privileges for
@@ -36,6 +38,7 @@ fail()  { _c_red "[bootstrap-host] FAIL: $1"; }
 K3D_VERSION="v5.9.0"
 MKCERT_VERSION="v1.4.4"
 HELM_VERSION="v4.2.3"
+ACT_VERSION="v0.2.89"
 
 NEEDS_RELOGIN=0
 PROVISION_FAILED=0
@@ -67,7 +70,7 @@ sudo_available() {
 # 1. Docker Engine
 # ---------------------------------------------------------------------------
 install_docker() {
-  info "Step 1/4: Docker Engine"
+  info "Step 1/5: Docker Engine"
 
   if require_cmd docker && systemctl is-active --quiet docker 2>/dev/null; then
     ok "Docker already installed and daemon active ($(docker --version))"
@@ -125,7 +128,7 @@ install_docker() {
 # 2. k3d
 # ---------------------------------------------------------------------------
 install_k3d() {
-  info "Step 2/4: k3d ${K3D_VERSION}"
+  info "Step 2/5: k3d ${K3D_VERSION}"
 
   if require_cmd k3d; then
     ok "k3d already installed ($(k3d version | head -1))"
@@ -166,7 +169,7 @@ install_k3d() {
 # 3. mkcert
 # ---------------------------------------------------------------------------
 install_mkcert() {
-  info "Step 3/4: mkcert ${MKCERT_VERSION}"
+  info "Step 3/5: mkcert ${MKCERT_VERSION}"
 
   if ! require_cmd mkcert; then
     if pacman -Ss '^mkcert$' 2>/dev/null | grep -q '^extra/mkcert\|^community/mkcert'; then
@@ -228,7 +231,7 @@ install_mkcert() {
 #     (old flags still work with deprecation warnings).
 #   - HELM_EXPERIMENTAL_OCI is obsolete — OCI support is on by default.
 install_helm() {
-  info "Step 4/4: Helm ${HELM_VERSION}"
+  info "Step 4/5: Helm ${HELM_VERSION}"
 
   if require_cmd helm && helm version --short 2>/dev/null | grep -q '^v4\.'; then
     ok "Helm v4 already installed ($(helm version --short))"
@@ -273,6 +276,52 @@ install_helm() {
 }
 
 # ---------------------------------------------------------------------------
+# 5. act (Plan 06, Task 1 — FOUND-05)
+# ---------------------------------------------------------------------------
+# act runs the estate's GitHub Actions workflows locally against the host
+# Docker daemon for fast inner-loop iteration before anything is pushed —
+# see estate/athena-infra/.actrc for the committed runtime configuration and
+# docs/runbooks/runner-ops.md for what a green act run does and does not
+# prove relative to a real self-hosted-runner run.
+install_act() {
+  info "Step 5/5: act ${ACT_VERSION}"
+
+  if require_cmd act; then
+    ok "act already installed ($(act --version 2>&1))"
+    return 0
+  fi
+
+  # Probe the distro package first (RESEARCH.md T-01-04: prefer pacman over
+  # a piped installer wherever available). As of this plan's research, act
+  # ships in Arch's `extra` repo at exactly the pinned version.
+  if pacman -Ss '^act$' 2>/dev/null | grep -q '^extra/act\|^community/act'; then
+    if ! sudo_available; then
+      fail "act install requires sudo."
+      PROVISION_FAILED=1
+      return 1
+    fi
+    info "Installing act from the distro package..."
+    sudo pacman -S --needed --noconfirm act
+  else
+    info "No distro package for act found — installing pinned ${ACT_VERSION} via upstream installer."
+    if ! sudo_available; then
+      fail "act's upstream installer needs sudo to write to /usr/local/bin. Run this script yourself in an interactive terminal."
+      PROVISION_FAILED=1
+      return 1
+    fi
+    curl -fsSL https://raw.githubusercontent.com/nektos/act/master/install.sh \
+      | sudo bash -s -- -b /usr/local/bin "${ACT_VERSION}"
+  fi
+
+  if ! require_cmd act; then
+    fail "act install did not put 'act' on PATH."
+    PROVISION_FAILED=1
+    return 1
+  fi
+  ok "act installed: $(act --version 2>&1)"
+}
+
+# ---------------------------------------------------------------------------
 # Version summary
 # ---------------------------------------------------------------------------
 _version_of() {
@@ -294,6 +343,7 @@ print_summary() {
   printf '  %-10s %s\n' "k3d"       "$(_version_of k3d version)"
   printf '  %-10s %s\n' "mkcert"    "$(_version_of mkcert -version)"
   printf '  %-10s %s\n' "helm"      "$(_version_of helm version --short)"
+  printf '  %-10s %s\n' "act"       "$(_version_of act --version)"
   printf '  %-10s %s\n' "kubectl"   "$(_version_of kubectl version --client)"
   printf '  %-10s %s\n' "terraform" "$(_version_of terraform version)"
   printf '  %-10s %s\n' "ansible"   "$(_version_of ansible --version)"
@@ -307,18 +357,19 @@ main() {
   install_k3d || true
   install_mkcert || true
   install_helm || true
+  install_act || true
 
   print_summary
 
   if [ "$PROVISION_FAILED" -ne 0 ]; then
-    fail "One or more of the four provisioned tools (docker, k3d, mkcert, helm v4) is not fully provisioned. See FAIL lines above."
+    fail "One or more of the five provisioned tools (docker, k3d, mkcert, helm v4, act) is not fully provisioned. See FAIL lines above."
     if [ "$NEEDS_RELOGIN" -eq 1 ]; then
       warn "If the only remaining gap is 'docker info' in THIS shell, start a new login session (log out/in, or run 'newgrp docker') and re-run this script to confirm."
     fi
     exit 1
   fi
 
-  ok "Host toolchain baseline complete: docker, k3d, mkcert (root CA trusted), Helm v4."
+  ok "Host toolchain baseline complete: docker, k3d, mkcert (root CA trusted), Helm v4, act."
   if [ "$NEEDS_RELOGIN" -eq 1 ]; then
     warn "Docker group membership was just added — start a new login session before relying on docker without sudo."
   fi
