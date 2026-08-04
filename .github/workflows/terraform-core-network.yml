@@ -271,18 +271,22 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: post/update the sticky per-environment plan comment (D-02)
-        # GITHUB_TOKEN here deliberately overrides the job's own default
-        # token with athena-ci-bot's PAT (ATHENA_CI_BOT_TOKEN, a repo
-        # secret set outside Terraform the same way every other one-off
-        # credential in this estate is -- see docs/runbooks/github-bootstrap.md)
-        # so the sticky comment is authored by athena-ci-bot, matching
-        # D-03's existing "the bot reviews/comments for the audit trail"
-        # pattern rather than the generic github-actions[bot] identity the
-        # action falls back to with no override.
+        # GITHUB_TOKEN is a genuine action `input` (action.yml, not an env
+        # var the runtime reads implicitly) -- it deliberately overrides
+        # the job's own default token with athena-ci-bot's PAT
+        # (ATHENA_CI_BOT_TOKEN, a repo secret set outside Terraform the
+        # same way every other one-off credential in this estate is -- see
+        # docs/runbooks/github-bootstrap.md) so the sticky comment is
+        # authored by athena-ci-bot, matching D-03's existing "the bot
+        # reviews/comments for the audit trail" pattern rather than the
+        # generic github-actions[bot] identity the action falls back to
+        # with no override. (A `with:` input, not `env:` -- a first attempt
+        # using `env: GITHUB_TOKEN:` was silently ignored, since the
+        # action's default `${{ github.token }}` only reads its own
+        # declared `with.GITHUB_TOKEN` input, not the environment.)
         uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
-        env:
-          GITHUB_TOKEN: ${{ secrets.ATHENA_CI_BOT_TOKEN }}
         with:
+          GITHUB_TOKEN: ${{ secrets.ATHENA_CI_BOT_TOKEN }}
           header: core-network-${{ matrix.env }}
           path: envs/${{ matrix.env }}/core-network/plan-output.txt
           message: |
