@@ -50,13 +50,26 @@ detected until the next verification run).
 
 ## Rebuild
 
-Run these in order — network, then data, then compute, matching every Phase
-2+ stack's own dependency order (CONTEXT.md D-15; remote-state data sources
-chain the same way, IAC-05):
+As of Plan 02-10, this is a single dispatched workflow, not a sequence of
+manual per-stack commands. `.github/workflows/rebuild-world.yml`
+(`workflow_dispatch`-only, never `push`/`pull_request`) re-applies every
+environment of every stack in dependency order — today that is Core/Network
+across dev/stg/prod; Phase 6 extends the same file with one new
+`rebuild-<stack>` job per additional stack (Data/Storage, then
+Application/Compute), each depending on the job for the stack before it.
 
-1. **Bring LocalStack itself back to a known-good state.**
+1. **Bring LocalStack itself back to a known-good state.** If it merely
+   restarted (host reboot, `docker compose down`), this step alone is
+   enough — LocalStack's own `ready.d` init hook
+   (`localstack/init/ready.d/create-state-buckets.sh`, D-18) recreates
+   `athena-tfstate-{dev,stg,prod}` by itself the moment the container
+   reports healthy, with zero manual bucket-creation step. If you are
+   deliberately drilling (not just recovering from a real restart), wipe the
+   data volume explicitly first so there is no ambiguity about what
+   survived:
    ```bash
    cd estate/athena-infra
+   cd localstack && docker compose down -v && cd ..
    ansible-playbook ansible/localstack.yml
    # equivalently, from the planning-repo root:
    #   ansible-playbook estate/athena-infra/ansible/localstack.yml
@@ -69,48 +82,78 @@ chain the same way, IAC-05):
    down, or LocalStack was already fine. It re-asserts the systemd unit,
    brings the compose project up, and waits for the health endpoint.
 
-2. **Re-create the Terraform state bucket(s).** LocalStack's S3 has no data
-   left, including the bucket each Terraform stack's backend config points
-   at. Every Phase 2+ stack's own `README`/`Makefile` names its exact bucket
-   name and creation command once that stack lands — this step is a
-   placeholder for those concrete commands until Phase 2 (Core/Network) and
-   Phase 6 (Data/Storage, Application/Compute) exist. The general shape:
+2. **Dispatch the rebuild workflow.**
    ```bash
-   aws --endpoint-url http://localhost:4566 s3 mb s3://<stack-state-bucket>
+   gh workflow run rebuild-world.yml --repo AuraBit/athena-infra --ref main \
+     -f target_environment=all   # or: dev | stg | prod, for a partial rebuild
    ```
+   `target_environment=all` fans out to dev, stg and prod in parallel
+   (matrix); each leg is a straight copy of `terraform-core-network.yml`'s
+   own `apply` job — same self-hosted runner label set, same
+   `terraform-core-${env}` concurrency group (a rebuild contends with a
+   normal apply for that environment rather than bypassing it), same
+   `environment: ${env}` binding (stg/prod still pause for the human
+   reviewer — this is not a second, ungated path to changing prod), and the
+   same `scripts/verify-network.sh ${env}` step as the leg's final step.
 
-3. **Re-apply the Terraform stacks, in dependency order.** Network first
-   (Phase 2 Core/Network — VPC, subnets, IP reservations), then data (Phase 6
-   Data/Storage — RDS/ElastiCache/S3, to the extent each is `emulated` per
-   `docs/localstack-service-coverage.md`), then compute (Phase 6
-   Application/Compute — EKS, node pools, load balancers). Each stack's own
-   directory carries the exact `terraform init && terraform apply` invocation
-   once written; this runbook's job is the ordering and the "why", not the
-   per-stack command, since those stacks do not exist yet as of Plan 03.
+3. **Approve the stg and prod gates when they pause**, the same way you
+   would for any normal merge-triggered apply:
    ```bash
-   # Concrete commands land here once Phase 2 / Phase 6 stacks exist:
-   # (cd governance/... or terraform/network && terraform apply)
-   # (cd terraform/data && terraform apply)
-   # (cd terraform/compute && terraform apply)
+   gh api repos/AuraBit/athena-infra/actions/runs/<run-id>/pending_deployments
+   gh api --method POST repos/AuraBit/athena-infra/actions/runs/<run-id>/pending_deployments \
+     -f state=approved -f comment="world rebuild" -F "environment_ids[]=<id>"
    ```
+   Record how much of the run's elapsed time was this approval wait versus
+   genuine Terraform work — the two numbers answer different recovery-time
+   questions; see `docs/drills/world-rebuild.md` for a worked example of
+   this split.
 
 4. **Note:** the Phase 1 governance stack (`governance/`, Plan 04) is
-   deliberately **not** part of this rebuild — its state lives in a local
-   file precisely because it tracks the real, persistent GitHub org, which a
-   LocalStack restart never touches (CONTEXT.md D-10 vs. D-15; see
-   `docs/localstack-service-coverage.md`'s "Where state lives, and why").
+   deliberately **not** part of this rebuild, and never will be — its state
+   lives in a local file precisely because it tracks the real, persistent
+   GitHub org, which a LocalStack restart never touches (CONTEXT.md D-10 vs.
+   D-15; see `docs/localstack-service-coverage.md`'s "Where state lives, and
+   why").
+
+## What a human must check afterwards that the workflow cannot check for itself
+
+`rebuild-world.yml`'s own `verify-network.sh` step proves each environment's
+resources are real and match Terraform's outputs — it does **not** prove the
+rebuild produced infrastructure a human actually wanted. After a rebuild
+completes green, a human should still:
+
+- **Read the job summaries** (`gh run view <run-id>` or the Actions UI) for
+  each leg's fresh plan output — a rebuild that reports `success` after
+  creating something genuinely different from before (a module version bump
+  that landed between the last known-good state and now, a tfvars change
+  nobody reviewed) is not something any automated check here catches; only a
+  human reading the plan diff catches an unwanted change riding along with a
+  wanted recovery.
+- **Confirm no stack was silently skipped.** `target_environment` defaults
+  to `all`, but a partial rebuild (`dev`/`stg`/`prod` alone) is a valid,
+  intentional input — a human should confirm the dispatch used the input
+  they meant to use, since the workflow has no way to know which one was
+  intended.
+- **Re-run any drill or manual verification a specific environment's own
+  documentation calls for** beyond `verify-network.sh` (e.g.
+  `scripts/verify-tfstate-locking.sh` if a lock-related incident preceded
+  this rebuild) — this workflow's own verify step is scoped to IAC-04
+  (resources are real), not every other property a given recovery might
+  need re-confirmed.
 
 ## Verify
 
 ```bash
 bash scripts/verify-localstack.sh   # all 5 checks PASS again
 aws --endpoint-url http://localhost:4566 s3 ls   # lists the re-created state bucket(s)
+bash scripts/verify-network.sh      # all three environments green (IAC-04)
 bash scripts/verify.sh              # full estate suite still green
 ```
 
-If any Phase 2+ stack was re-applied, also re-run that stack's own
-verification (its `README`/`Makefile` will name the command once it exists)
-before considering the rebuild complete.
+See `docs/drills/world-rebuild.md` for the worked example: a real dispatch,
+a real approval-wait/machine-time split, and a real transient failure
+(a runner-pool tool-cache race, deferred-items.md item 7) encountered and
+recovered from live.
 
 ## Reasoning, for the record
 
