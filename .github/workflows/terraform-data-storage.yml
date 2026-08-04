@@ -1,0 +1,427 @@
+name: terraform-data-storage
+
+# D-01's plan-on-PR / apply-on-merge pipeline, applied to the Data/Storage
+# Terraform stack -- a faithful sibling of terraform-core-network.yml (Plan
+# 03-02, Task 3; CONTEXT.md D-07's "reuse Phase 2's CI pattern verbatim").
+# Every job restates its own `permissions:` block, every third-party
+# `uses:` is pinned to the same immutable 40-character commit SHAs
+# terraform-core-network.yml already resolved and this org already
+# enforces (actions-security.tf).
+#
+# Two things are deliberately BETTER than the file this one is copied from
+# (found live in Plan 02's own deferred-items.md item 6): `gate` below
+# aggregates `apply`'s result as well as `plan`'s, and treats an
+# empty-matrix "failure" identically to an intentional "skipped" using the
+# same changed_envs/event test `plan`'s own leg already uses -- see that
+# job's inline comments for the full empirically-discovered GitHub Actions
+# quirk this accounts for.
+#
+# Trigger shape: `pull_request` (no branch filter, no top-level `paths:` --
+# this workflow runs on every PR, exactly like terraform-core-network.yml;
+# the change-detection narrowing happens inside `detect-changes` via
+# dorny/paths-filter, not at the trigger level, so a PR touching only
+# core-network still gets an intentional, correctly-reasoned "gate" report
+# from this workflow rather than no report at all) and `push` limited to
+# `main` (apply only ever runs post-merge, D-01). `merge_group` is declared
+# for parity even though athena-infra carries no merge queue today (D-02
+# restricts that to athena-app) -- an unused trigger type is inert, not a
+# risk, and its absence would be a gap the day this repo ever gains one.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+
+permissions:
+  contents: read
+
+env:
+  # Must equal terraform-core-network.yml's own TF_VERSION and
+  # ansible/roles/github-runner/defaults/main.yml's athena_terraform_version
+  # -- the same single-source-of-truth requirement that file's own comment
+  # states, repeated here because this is now a second place that literal
+  # has to agree.
+  TF_VERSION: "1.15.8"
+
+jobs:
+  # ---------------------------------------------------------------------
+  # detect-changes -- which env directories did this PR/push touch? Same
+  # shape as terraform-core-network.yml's own job: a filter matching
+  # nothing is correct and harmless.
+  # ---------------------------------------------------------------------
+  detect-changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      changed_envs: ${{ steps.envs-only.outputs.result }}
+      modules_changed: ${{ steps.filter.outputs.modules }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        id: filter
+        with:
+          filters: |
+            dev: 'envs/dev/data-storage/**'
+            stg: 'envs/stg/data-storage/**'
+            prod: 'envs/prod/data-storage/**'
+            modules: 'modules/data-storage/**'
+
+      - name: build the env-only matrix array
+        id: envs-only
+        run: |
+          set -euo pipefail
+          RESULT="$(echo '${{ steps.filter.outputs.changes }}' | jq -c '[.[] | select(. != "modules")]')"
+          echo "changed envs (modules filter excluded): ${RESULT}"
+          echo "result=${RESULT}" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------
+  # static -- fmt / validate / Checkov / skip-lint. Always runs, on every
+  # trigger, unconditionally -- same D-11 reasoning as
+  # terraform-core-network.yml's own static job: no localhost:4566
+  # reachability needed, so this belongs on the hosted runner.
+  #
+  # Deliberately reuses the SAME broad `envs/ modules/` fmt-check and
+  # `-d envs` Checkov scope terraform-core-network.yml already uses --
+  # both trees now hold both stacks' directories, and re-scanning the
+  # other stack's already-passing content here is harmless, matching
+  # "reuse without deviation" over inventing a stack-scoped variant.
+  # ---------------------------------------------------------------------
+  static:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt -check -recursive (envs/ and modules/)
+        run: terraform fmt -check -recursive envs/ modules/
+
+      - name: terraform validate -- every existing data-storage env root and the module itself
+        run: |
+          set -euo pipefail
+          for dir in modules/data-storage envs/*/data-storage; do
+            [ -d "${dir}" ] || continue
+            echo "::group::terraform validate -- ${dir}"
+            (cd "${dir}" && terraform init -backend=false -input=false && terraform validate)
+            echo "::endgroup::"
+          done
+
+      - name: install checkov (POL-04, pinned to the version ansible/roles/github-runner/defaults/main.yml installs on self-hosted)
+        run: pip install "checkov==3.3.9"
+
+      - name: checkov (POL-04 hard-blocking gate; D-24)
+        run: checkov -d modules/data-storage -d envs --config-file .checkov.yaml
+
+      - name: checkov vacuous-scan guard (POL-04 backstop truth)
+        run: |
+          set -euo pipefail
+          checkov -d modules/data-storage -d envs --config-file .checkov.yaml -o json --quiet > checkov-summary.json
+          python3 - <<'PY'
+          import json, sys
+
+          dec = json.JSONDecoder()
+          txt = open("checkov-summary.json").read()
+          idx = 0
+          docs = 0
+          total_resources = 0
+          total_parse_errors = 0
+          while idx < len(txt):
+              rest = txt[idx:].lstrip()
+              if not rest:
+                  break
+              obj, end = dec.raw_decode(rest)
+              docs += 1
+              summary = obj.get("summary", {})
+              total_resources += summary.get("resource_count", 0)
+              total_parse_errors += summary.get("parsing_errors", 0)
+              idx += (len(txt[idx:]) - len(rest)) + end
+
+          print(f"checkov produced {docs} report(s); {total_resources} total resource(s) scanned; {total_parse_errors} parsing error(s)")
+          if docs == 0:
+              print("::error::checkov produced no JSON report at all -- nothing to trust")
+              sys.exit(1)
+          if total_parse_errors > 0:
+              print("::error::checkov reported one or more parsing errors -- a broken scan must not report green")
+              sys.exit(1)
+          if total_resources == 0:
+              print("::error::checkov scanned zero resources -- a vacuous scan must not report green")
+              sys.exit(1)
+          PY
+
+      - name: verify-checkov-skips.sh (D-24 auditable-exception lint)
+        run: bash scripts/verify-checkov-skips.sh
+
+  # ---------------------------------------------------------------------
+  # plan -- self-hosted, matrix over detect-changes' env array. PR-only,
+  # same-repo-branch only (ADR-0006 / D-10). No `environment:`, no
+  # `concurrency:` -- same reasoning as terraform-core-network.yml's own
+  # plan job.
+  # ---------------------------------------------------------------------
+  plan:
+    needs: detect-changes
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, athena-local]
+    strategy:
+      fail-fast: false
+      matrix:
+        env: ${{ fromJSON(needs.detect-changes.outputs.changed_envs) }}
+    permissions:
+      contents: read
+      pull-requests: write
+    defaults:
+      run:
+        working-directory: envs/${{ matrix.env }}/data-storage
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: export ${{ matrix.env }}'s LocalStack credentials
+        run: |
+          set -euo pipefail
+          case "${{ matrix.env }}" in
+            dev)  ACCOUNT_ID="111111111111" ;;
+            stg)  ACCOUNT_ID="222222222222" ;;
+            prod) ACCOUNT_ID="333333333333" ;;
+            *) echo "unknown env '${{ matrix.env }}'" >&2; exit 1 ;;
+          esac
+          {
+            echo "AWS_ACCESS_KEY_ID=${ACCOUNT_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${ACCOUNT_ID}"
+            echo "AWS_DEFAULT_REGION=us-east-1"
+          } >> "$GITHUB_ENV"
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        run: terraform init -input=false
+
+      - name: terraform plan
+        id: plan
+        run: |
+          set -euo pipefail
+          terraform plan -out=tfplan -input=false -no-color | tee plan-output.txt
+
+      - name: write plan summary to the job summary
+        run: |
+          {
+            echo "### terraform plan -- ${{ matrix.env }} (data-storage)"
+            echo '```'
+            cat plan-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: post/update the sticky per-environment plan comment (D-02)
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        with:
+          GITHUB_TOKEN: ${{ secrets.ATHENA_CI_BOT_TOKEN }}
+          header: data-storage-${{ matrix.env }}
+          path: envs/${{ matrix.env }}/data-storage/plan-output.txt
+          message: |
+            ### Terraform plan -- `${{ matrix.env }}` (data-storage)
+
+            <details><summary>Show plan</summary>
+
+            ```
+            {{{content}}}
+            ```
+
+            </details>
+
+  # ---------------------------------------------------------------------
+  # apply -- self-hosted, matrix over the same env array, push-to-main
+  # only. `environment: ${{ matrix.env }}` binds the same six Environments
+  # governance/environments.tf already provisions for athena-infra (D-31) --
+  # no new Environment or variable is needed for this stack: the existing
+  # per-environment AWS_* variables (governance/environment-variables.tf)
+  # are stack-agnostic simulated-account literals, already scoped correctly
+  # for any Terraform root that binds that Environment. `concurrency:` is
+  # declared INSIDE this job block only, same reasoning as
+  # terraform-core-network.yml's own apply job.
+  # ---------------------------------------------------------------------
+  apply:
+    needs: [detect-changes, static]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, linux, x64, athena-local]
+    strategy:
+      fail-fast: false
+      matrix:
+        env: ${{ fromJSON(needs.detect-changes.outputs.changed_envs) }}
+    environment: ${{ matrix.env }}
+    concurrency:
+      group: terraform-data-storage-${{ matrix.env }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: envs/${{ matrix.env }}/data-storage
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: export ${{ matrix.env }}'s LocalStack credentials from this Environment's variables (D-13)
+        run: |
+          set -euo pipefail
+          : "${AWS_ACCESS_KEY_ID:?vars.AWS_ACCESS_KEY_ID is not set for the '${{ matrix.env }}' GitHub Environment -- see docs/runbooks/runner-ops.md}"
+          {
+            echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
+            echo "AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}"
+          } >> "$GITHUB_ENV"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ vars.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        run: terraform init -input=false
+
+      - name: terraform plan (fresh re-plan, D-05 -- never the PR's saved plan artifact)
+        run: |
+          set -euo pipefail
+          terraform plan -out=tfplan -input=false -no-color | tee plan-output.txt
+
+      - name: write the FRESH plan's summary to the job summary
+        run: |
+          {
+            echo "### terraform apply -- ${{ matrix.env }} (data-storage; fresh re-plan applied below)"
+            echo '```'
+            cat plan-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: terraform apply
+        run: terraform apply -input=false tfplan
+
+      - name: verify-data-storage.sh (IAC-04 -- apply green + resource real, independently confirmed, same job as the apply)
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/verify-data-storage.sh ${{ matrix.env }}
+
+  # ---------------------------------------------------------------------
+  # gate -- the single stable-named required status check main's ruleset
+  # already points at (D-32; this workflow's own `gate` job shares that
+  # exact context name with terraform-core-network.yml's, deliberately --
+  # both report under "gate", so the SAME required check is satisfied by
+  # whichever workflow(s) actually had relevant work for a given PR, and
+  # every workflow that could touch main contributes its own aggregated
+  # verdict under that one name. No change to governance/rulesets.tf is
+  # needed for this: "gate" is already required.
+  #
+  # Adds `apply` to `needs` alongside `plan` -- deliberately better than
+  # terraform-core-network.yml, whose own `gate` never fed `apply`'s result
+  # in (Plan 02's deferred-items.md item 6). `apply`'s result gets the same
+  # empty-matrix "failure"-vs-"skipped" treatment `plan` already needed,
+  # gated on the SAME two-condition test, mirrored for apply's own trigger
+  # shape (PR-events skip apply entirely; push events with an empty
+  # changed_envs have nothing to apply).
+  # ---------------------------------------------------------------------
+  gate:
+    needs: [detect-changes, static, plan, apply]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: evaluate aggregate result
+        run: |
+          set -euo pipefail
+
+          DETECT_RESULT="${{ needs.detect-changes.result }}"
+          STATIC_RESULT="${{ needs.static.result }}"
+          PLAN_RESULT="${{ needs.plan.result }}"
+          APPLY_RESULT="${{ needs.apply.result }}"
+          EVENT="${{ github.event_name }}"
+          CHANGED_ENVS='${{ needs.detect-changes.outputs.changed_envs }}'
+
+          echo "detect-changes.result = ${DETECT_RESULT}"
+          echo "static.result         = ${STATIC_RESULT}"
+          echo "plan.result           = ${PLAN_RESULT}"
+          echo "apply.result          = ${APPLY_RESULT}"
+          echo "event_name            = ${EVENT}"
+          echo "changed_envs           = ${CHANGED_ENVS}"
+          echo
+
+          FAIL=0
+
+          if [ "${DETECT_RESULT}" = "failure" ] || [ "${DETECT_RESULT}" = "cancelled" ]; then
+            echo "FAIL: detect-changes did not succeed (result=${DETECT_RESULT})"
+            FAIL=1
+          fi
+
+          if [ "${STATIC_RESULT}" != "success" ]; then
+            echo "FAIL: static must be success, was '${STATIC_RESULT}'"
+            FAIL=1
+          fi
+
+          if [ "${PLAN_RESULT}" = "cancelled" ]; then
+            echo "FAIL: plan was cancelled"
+            FAIL=1
+          elif [ "${PLAN_RESULT}" = "failure" ] || [ "${PLAN_RESULT}" = "skipped" ]; then
+            # Same empirically-discovered GitHub Actions quirk
+            # terraform-core-network.yml's gate documents at length: a job
+            # whose own `if:` is false reports "skipped" correctly, but a
+            # job whose `if:` is TRUE with an EMPTY `strategy.matrix`
+            # reports "failure" on this GitHub Actions version. Both are
+            # handled identically here.
+            if [ "${EVENT}" = "push" ] || [ "${EVENT}" = "merge_group" ]; then
+              echo "OK: plan is intentionally not present on push/merge_group events (apply owns push, not plan); reported '${PLAN_RESULT}'"
+            elif [ "${CHANGED_ENVS}" = "[]" ]; then
+              echo "OK: plan had nothing to do -- detect-changes reported an empty environment array (e.g. a core-network-only PR); GitHub reported this leg as '${PLAN_RESULT}'"
+            else
+              echo "FAIL: plan reported '${PLAN_RESULT}' but detect-changes reported changed_envs=${CHANGED_ENVS} -- a leg that should have run either did not run at all (see ADR-0006 if this is a fork PR) or ran and failed"
+              FAIL=1
+            fi
+          fi
+
+          # apply's own if: is a plain boolean guard (push-to-main only,
+          # no matrix underneath the guard itself) -- a guard that
+          # evaluates false reports "skipped" genuinely (same mechanism as
+          # terraform-core-network.yml's module-test job). An empty
+          # changed_envs on a genuine push, though, still produces the
+          # SAME empty-matrix "failure" quirk plan's own matrix does --
+          # apply's strategy.matrix is the thing evaluating empty in that
+          # case, not its `if:`.
+          if [ "${APPLY_RESULT}" = "cancelled" ]; then
+            echo "FAIL: apply was cancelled"
+            FAIL=1
+          elif [ "${APPLY_RESULT}" = "failure" ] || [ "${APPLY_RESULT}" = "skipped" ]; then
+            if [ "${EVENT}" = "pull_request" ] || [ "${EVENT}" = "merge_group" ]; then
+              echo "OK: apply is intentionally not present on pull_request/merge_group events (it only ever runs on push to main); reported '${APPLY_RESULT}'"
+            elif [ "${CHANGED_ENVS}" = "[]" ]; then
+              echo "OK: apply had nothing to do -- detect-changes reported an empty environment array on this push; this is an intentional skip, reported as '${APPLY_RESULT}'"
+            else
+              echo "FAIL: apply reported '${APPLY_RESULT}' but detect-changes reported changed_envs=${CHANGED_ENVS} -- a leg that should have applied either did not run at all or ran and failed"
+              FAIL=1
+            fi
+          fi
+
+          if [ "${FAIL}" -eq 1 ]; then
+            echo
+            echo "gate: FAIL"
+            exit 1
+          fi
+
+          echo
+          echo "gate: PASS"
