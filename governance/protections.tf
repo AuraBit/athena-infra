@@ -96,6 +96,13 @@ resource "github_repository_ruleset" "app_main" {
       required_check {
         context = "lint"
       }
+      # Plan 03-07 Task 3 (POL-03/D-23): media-ci.yml's aggregator job. Required
+      # only after the check had reported on the repository (gate=success on
+      # a93cc74, run 30934151939) — the estate's confirm-before-require
+      # precedent, so the ruleset cannot deadlock main on a never-reported check.
+      required_check {
+        context = "gate"
+      }
     }
 
     pull_request {
