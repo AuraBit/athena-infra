@@ -436,6 +436,81 @@ else
           "observed ResourceId=[${FLOW_LOG_RESOURCE_ID}] FlowLogStatus=[${FLOW_LOG_STATUS}]"
       fi
     fi
+
+    # -------------------------------------------------------------------
+    # Default security group takeover + baseline shared security groups
+    # (Plan 02-05, Task 3; D-28). The default-SG assertion is the strongest
+    # kind this script makes: it must show EXACTLY ZERO IpPermissions and
+    # EXACTLY ZERO IpPermissionsEgress entries, not merely "fewer than
+    # before" -- a default security group carrying even one leftover
+    # permissive rule is the exact failure mode this control exists to
+    # close. allow-internal-vpc's ingress CIDR is compared for EXACT
+    # equality against vpc_cidr_block's own output, not merely "some
+    # ingress rule exists" -- a baseline group that allows the wrong CIDR
+    # is worse than one that allows none, because it looks correct at a
+    # glance.
+    # -------------------------------------------------------------------
+    DEFAULT_SG_ID="$(printf '%s' "${OUTPUT_JSON}" | jq -r '.default_security_group_id.value // empty' 2>/dev/null)"
+    if [ -z "${DEFAULT_SG_ID}" ]; then
+      check "${env_name}: default_security_group_id output is present" 1 \
+        "terraform output -json has no .default_security_group_id.value key"
+    else
+      DEFAULT_SG_DESCRIBE="$(aws_ls ec2 describe-security-groups --group-ids "${DEFAULT_SG_ID}" --output json)"
+      DEFAULT_SG_INGRESS_COUNT="$(printf '%s' "${DEFAULT_SG_DESCRIBE}" | jq -r '.SecurityGroups[0].IpPermissions | length' 2>/dev/null)"
+      DEFAULT_SG_EGRESS_COUNT="$(printf '%s' "${DEFAULT_SG_DESCRIBE}" | jq -r '.SecurityGroups[0].IpPermissionsEgress | length' 2>/dev/null)"
+
+      if [ "${DEFAULT_SG_INGRESS_COUNT}" = "0" ]; then
+        check "${env_name}: default security group (${DEFAULT_SG_ID}) has zero IpPermissions (ingress)" 0
+      else
+        check "${env_name}: default security group has zero IpPermissions (ingress)" 1 \
+          "observed count=[${DEFAULT_SG_INGRESS_COUNT:-<none>}]"
+      fi
+
+      if [ "${DEFAULT_SG_EGRESS_COUNT}" = "0" ]; then
+        check "${env_name}: default security group (${DEFAULT_SG_ID}) has zero IpPermissionsEgress (egress)" 0
+      else
+        check "${env_name}: default security group has zero IpPermissionsEgress (egress)" 1 \
+          "observed count=[${DEFAULT_SG_EGRESS_COUNT:-<none>}]"
+      fi
+    fi
+
+    VPC_CIDR_BLOCK="$(printf '%s' "${OUTPUT_JSON}" | jq -r '.vpc_cidr_block.value // empty' 2>/dev/null)"
+    BASELINE_SG_IDS_JSON="$(printf '%s' "${OUTPUT_JSON}" | jq -c '.baseline_security_group_ids.value // {}' 2>/dev/null)"
+    BASELINE_SG_KEY_COUNT="$(printf '%s' "${BASELINE_SG_IDS_JSON}" | jq 'keys | length' 2>/dev/null)"
+
+    if [ -z "${BASELINE_SG_KEY_COUNT}" ] || [ "${BASELINE_SG_KEY_COUNT}" -eq 0 ] 2>/dev/null; then
+      check "${env_name}: baseline_security_group_ids output is present and non-empty" 1 \
+        "terraform output -json has no non-empty .baseline_security_group_ids.value"
+    else
+      for purpose in "allow-internal-vpc" "vpc-endpoints"; do
+        SG_ID="$(printf '%s' "${BASELINE_SG_IDS_JSON}" | jq -r --arg k "${purpose}" '.[$k] // empty' 2>/dev/null)"
+        if [ -z "${SG_ID}" ]; then
+          check "${env_name}: baseline_security_group_ids has key \"${purpose}\"" 1 \
+            "no entry for \"${purpose}\" in .baseline_security_group_ids.value"
+          continue
+        fi
+
+        SG_DESCRIBE="$(aws_ls ec2 describe-security-groups --group-ids "${SG_ID}" --output json)"
+        SG_OBSERVED_ID="$(printf '%s' "${SG_DESCRIBE}" | jq -r '.SecurityGroups[0].GroupId // empty' 2>/dev/null)"
+
+        if [ "${SG_OBSERVED_ID}" = "${SG_ID}" ]; then
+          check "${env_name}: baseline security group \"${purpose}\" (${SG_ID}) exists" 0
+        else
+          check "${env_name}: baseline security group \"${purpose}\" exists" 1 \
+            "expected=[${SG_ID}] observed=[${SG_OBSERVED_ID:-<none>}]"
+        fi
+
+        if [ "${purpose}" = "allow-internal-vpc" ]; then
+          INGRESS_CIDR="$(printf '%s' "${SG_DESCRIBE}" | jq -r '.SecurityGroups[0].IpPermissions[0].IpRanges[0].CidrIp // empty' 2>/dev/null)"
+          if [ -n "${VPC_CIDR_BLOCK}" ] && [ "${INGRESS_CIDR}" = "${VPC_CIDR_BLOCK}" ]; then
+            check "${env_name}: allow-internal-vpc's ingress CIDR (${INGRESS_CIDR}) equals vpc_cidr_block exactly" 0
+          else
+            check "${env_name}: allow-internal-vpc's ingress CIDR equals vpc_cidr_block exactly" 1 \
+              "expected=[${VPC_CIDR_BLOCK:-<none>}] observed=[${INGRESS_CIDR:-<none>}]"
+          fi
+        fi
+      done
+    fi
   done
 fi
 
