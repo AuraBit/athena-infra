@@ -251,6 +251,33 @@ else
       fi
     fi
 
+    # -------------------------------------------------------------------
+    # public_route_table_id's own 0.0.0.0/0 route to the internet gateway
+    # (Plan 02-10, Task 2 -- coverage gap found live by
+    # scripts/drills/fake-success-drill.sh's second variant: this output
+    # existed since Plan 02-03 but had no independent assertion of its own
+    # here. A route deleted directly against LocalStack, bypassing
+    # Terraform, previously left every check in this script green --
+    # exactly the fake-success condition IAC-04 exists to catch, just not
+    # yet caught for THIS specific resource. See
+    # docs/drills/fake-success-verification.md for the live before/after
+    # proof.
+    # -------------------------------------------------------------------
+    PUBLIC_RT_ID="$(printf '%s' "${OUTPUT_JSON}" | jq -r '.public_route_table_id.value // empty' 2>/dev/null)"
+    if [ -z "${PUBLIC_RT_ID}" ]; then
+      check "${env_name}: public_route_table_id output is present" 1 \
+        "terraform output -json has no .public_route_table_id.value key"
+    else
+      PUBLIC_RT_DESCRIBE="$(aws_ls ec2 describe-route-tables --route-table-ids "${PUBLIC_RT_ID}" --output json)"
+      PUBLIC_RT_IGW_TARGET="$(printf '%s' "${PUBLIC_RT_DESCRIBE}" | jq -r --arg cidr "0.0.0.0/0" '.RouteTables[0].Routes[]? | select(.DestinationCidrBlock==$cidr) | .GatewayId // empty' 2>/dev/null)"
+      if [ -n "${IGW_ID}" ] && [ "${PUBLIC_RT_IGW_TARGET}" = "${IGW_ID}" ]; then
+        check "${env_name}: public_route_table_id (${PUBLIC_RT_ID}) has a 0.0.0.0/0 route to internet_gateway_id (${IGW_ID})" 0
+      else
+        check "${env_name}: public_route_table_id has a 0.0.0.0/0 route to internet_gateway_id" 1 \
+          "expected gateway=[${IGW_ID:-<none>}] observed gateway=[${PUBLIC_RT_IGW_TARGET:-<none>}]"
+      fi
+    fi
+
     NAT_IDS_JSON="$(printf '%s' "${OUTPUT_JSON}" | jq -c '.nat_gateway_ids.value // []' 2>/dev/null)"
     NAT_COUNT="$(printf '%s' "${NAT_IDS_JSON}" | jq 'length' 2>/dev/null)"
     if [ -z "${NAT_COUNT}" ] || [ "${NAT_COUNT}" -eq 0 ] 2>/dev/null; then
