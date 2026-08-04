@@ -220,6 +220,15 @@ resource "github_repository_ruleset" "gitops_main" {
     bypass_mode = local.athena_ci_bot_bypass.bypass_mode
   }
 
+  # Plan 03-08 (D-28) — NOTE, verified live: an Integration-type bypass for
+  # the GitHub Actions app (id 15368) is SILENTLY DROPPED by GitHub's
+  # ruleset API (the PUT succeeds, the entry never appears in a GET, while
+  # the provider records it in state — permanent invisible drift). The
+  # render pipeline therefore pushes nothing from CI at all:
+  # render.yml is a render-CHECK (asserts committed envs/** match a fresh
+  # deterministic render), and the only automated pusher to this repo's
+  # main remains athena-ci-bot via the User bypass above (media-ci.yml's
+  # gitops-handoff job commits the dev pin plus its rendered consequence).
   rules {
     non_fast_forward = true
     deletion         = true
