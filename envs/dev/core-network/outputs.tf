@@ -92,3 +92,15 @@ output "flow_log_id" {
   description = "ID of dev's VPC flow log."
   value       = module.core_network.flow_log_id
 }
+
+# --- Plan 02-05, Task 3: default security group + baseline SG outputs ------
+
+output "default_security_group_id" {
+  description = "ID of dev's default security group, adopted and stripped to zero ingress/egress rules."
+  value       = module.core_network.default_security_group_id
+}
+
+output "baseline_security_group_ids" {
+  description = "Map of baseline security group purpose -> id for dev: \"allow-internal-vpc\" and \"vpc-endpoints\"."
+  value       = module.core_network.baseline_security_group_ids
+}
