@@ -2,6 +2,13 @@
 #
 # Mirrors modules/core-network's own variables; this env root's tfvars file
 # supplies the actual dev values.
+#
+# Comment-only touch (Plan 02-04, Task 3): this file's own change is the
+# live-verification PR that exercises terraform-core-network.yml end to
+# end for the first time now that the workflow exists on main -- a
+# comment-only edit produces a clean "No changes" plan/apply, proving the
+# pipeline's shell logic and gating without risking any real drift against
+# the already-applied dev stack.
 
 variable "name_prefix" {
   description = "Short project/estate prefix used in resource Name tags."

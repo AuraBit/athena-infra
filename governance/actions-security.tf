@@ -23,12 +23,19 @@ resource "github_actions_organization_permissions" "this" {
     verified_allowed     = true
     # Every named third-party action this estate actually uses, beyond
     # GitHub-owned/verified-creator actions covered by the two flags above.
-    # Empty today — only actions/checkout (github-owned) is referenced by
-    # any workflow as of this plan. Later phases append their own
-    # third-party actions here explicitly as they're introduced; an action
-    # not GitHub-owned, not from a verified creator, and not named here is
-    # rejected org-wide, which is the point (D-08).
-    patterns_allowed = []
+    # An action not GitHub-owned, not from a verified creator, and not
+    # named here is rejected org-wide, which is the point (D-08) --
+    # confirmed the hard way in Plan 02-04: terraform-core-network.yml's
+    # first run against a real PR reported `startup_failure` with zero
+    # jobs scheduled, before this list named the two non-verified-creator
+    # actions it references. hashicorp/setup-terraform is not added here
+    # explicitly -- HashiCorp carries GitHub's verified-creator badge, so
+    # `verified_allowed = true` already covers it; the plan/apply job logs
+    # confirm this (no rejection for that action specifically).
+    patterns_allowed = [
+      "dorny/paths-filter@*",                     # Plan 02-04 -- terraform-core-network.yml's detect-changes job
+      "marocchino/sticky-pull-request-comment@*", # Plan 02-04 -- terraform-core-network.yml's plan job (D-02 sticky comment)
+    ]
   }
 }
 
