@@ -62,3 +62,17 @@ variable "single_nat_gateway" {
   type        = bool
   default     = true
 }
+
+# --- Plan 02-05, Task 2: flow-logs bucket lifecycle -------------------------
+
+variable "flow_log_transition_days" {
+  description = "Days after object creation before a flow-log object transitions to STANDARD_IA (D-27). Default balances query-recency (Standard storage) against cost for the older, rarely-queried tail of the retention window."
+  type        = number
+  default     = 30
+}
+
+variable "flow_log_retention_days" {
+  description = "Days after object creation before a flow-log object expires entirely (D-27). Must exceed flow_log_transition_days; this module does not enforce that ordering itself (the S3 lifecycle API already rejects an invalid rule), but the default values keep them coherent."
+  type        = number
+  default     = 365
+}
