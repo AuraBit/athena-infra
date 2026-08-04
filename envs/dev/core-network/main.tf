@@ -29,3 +29,9 @@ module "core_network" {
   # trade-off gets demonstrated, not just asserted in a comment. Prod's env
   # root (Plan 02-08+) sets its own tfvars value to false.
 }
+
+# Comment-only touch (Plan 02-06, Task 3): exercises D-32's newly-required
+# `gate` check on a real pull request against dev -- confirms the merge
+# button stays blocked until the aggregator is green, and that merging
+# triggers an unattended `apply (dev)` (dev carries zero Environment
+# protection rules). No resource change; `terraform plan` reports no diff.
