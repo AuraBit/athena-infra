@@ -20,6 +20,31 @@ on:
   pull_request:
   push:
     branches: [main]
+  # workflow_dispatch -- Plan 02-09's concurrency-queue drill needs a way to
+  # trigger a real `apply` run for one named environment on demand, with an
+  # optional artificial hold before that job's Terraform steps so the
+  # resulting queued state is unambiguously observable rather than hoped-for
+  # (D-33; RESEARCH.md Open Question 2 -- two quick pushes often just
+  # execute sequentially anyway, which looks identical to queuing and proves
+  # nothing). Both inputs are drill-only: drill_env names which single
+  # environment detect-changes' env-only-matrix step below hands to the
+  # apply matrix (bypassing the normal push-diff filter, which has nothing
+  # to diff on a manual dispatch), and drill_hold_seconds defaults to "0" --
+  # a normal dispatch with the default input, and every push/pull_request
+  # trigger, adds no delay at all (see the hold step in the `apply` job,
+  # gated on event_name == workflow_dispatch AND a non-zero value).
+  workflow_dispatch:
+    inputs:
+      drill_env:
+        description: "Environment the apply job's matrix targets for this manual dispatch (Plan 02-09 concurrency drill)"
+        required: true
+        type: choice
+        options: [dev, stg, prod]
+      drill_hold_seconds:
+        description: "Drill-only: seconds the apply job sleeps before its Terraform steps. Defaults to 0 (inert) -- never set this for anything but the concurrency-queue drill."
+        required: false
+        default: "0"
+        type: string
 
 permissions:
   contents: read
@@ -82,10 +107,21 @@ jobs:
         # out into its own output rather than feeding "changes" straight
         # into strategy.matrix.env (which would try to plan/apply a
         # non-existent "modules" environment).
+        #
+        # workflow_dispatch (Plan 02-09's concurrency drill) carries no file
+        # diff to filter at all -- the operator names the single target
+        # environment directly via the drill_env input, so this step
+        # short-circuits paths-filter's output entirely for that one event
+        # type rather than asking a diff-based filter a question it was
+        # never asked.
         id: envs-only
         run: |
           set -euo pipefail
-          RESULT="$(echo '${{ steps.filter.outputs.changes }}' | jq -c '[.[] | select(. != "modules")]')"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RESULT='["${{ inputs.drill_env }}"]'
+          else
+            RESULT="$(echo '${{ steps.filter.outputs.changes }}' | jq -c '[.[] | select(. != "modules")]')"
+          fi
           echo "changed envs (modules filter excluded): ${RESULT}"
           echo "result=${RESULT}" >> "$GITHUB_OUTPUT"
 
@@ -350,7 +386,12 @@ jobs:
   # ---------------------------------------------------------------------
   apply:
     needs: [detect-changes, static]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # workflow_dispatch admitted alongside the existing push-to-main
+    # condition -- Plan 02-09's concurrency drill triggers a real apply run
+    # on demand, for the single environment named by the drill_env input
+    # (see detect-changes' env-only-matrix step above). Nothing about what
+    # triggers apply on a normal merge changes.
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, linux, x64, athena-local]
     strategy:
       fail-fast: false
@@ -377,6 +418,27 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+
+      - name: drill-only hold before Terraform steps (Plan 02-09 concurrency drill; inert by default)
+        # Exists only to make Plan 02-09's concurrency-queue drill produce
+        # an unambiguously observable queued state -- see the
+        # workflow_dispatch input's own comment above for why "back to
+        # back" pushes alone are not a reliable demonstration. This step
+        # does not even run on a push-triggered apply (the `if:` below is
+        # workflow_dispatch-only), so a normal merge to main is provably
+        # unaffected by this step's mere presence in the file, not just by
+        # drill_hold_seconds defaulting to "0".
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          HOLD="${{ inputs.drill_hold_seconds }}"
+          echo "drill_hold_seconds=${HOLD}"
+          if [ -n "${HOLD}" ] && [ "${HOLD}" != "0" ]; then
+            echo "Holding for ${HOLD}s before this job's Terraform steps (drill-only, Plan 02-09)."
+            sleep "${HOLD}"
+          else
+            echo "drill_hold_seconds is 0 (or unset) -- no hold applied."
+          fi
 
       - name: export ${{ matrix.env }}'s LocalStack credentials from this Environment's variables (D-13)
         # Unlike the `plan` job above, this job DOES bind
@@ -521,9 +583,11 @@ jobs:
             # "failure", not "skipped", on this GitHub Actions version.
             # Treating them identically, gated on the SAME two conditions
             # below, is what makes the gate correct in both directions:
-            # - event == push: plan never runs on push by design (apply
-            #   owns push) -- OK regardless of which of the two result
-            #   values GitHub happened to report.
+            # - event == push OR workflow_dispatch: plan never runs on
+            #   either (apply owns push; workflow_dispatch is Plan 02-09's
+            #   concurrency drill, which also only ever targets apply) --
+            #   OK regardless of which of the two result values GitHub
+            #   happened to report.
             # - detect-changes reported an EMPTY environment array
             #   (changed_envs == '[]', e.g. a modules-only PR): there was
             #   genuinely nothing to plan -- OK regardless of whether
@@ -537,8 +601,8 @@ jobs:
             #   that is a gate failure either way. This is deliberate:
             #   silently accepting either case here is exactly the hole
             #   Pitfall 3 warns about.
-            if [ "${EVENT}" = "push" ]; then
-              echo "OK: plan is intentionally not present on push events (apply owns push, not plan); reported '${PLAN_RESULT}'"
+            if [ "${EVENT}" = "push" ] || [ "${EVENT}" = "workflow_dispatch" ]; then
+              echo "OK: plan is intentionally not present on push/workflow_dispatch events (apply owns both, not plan); reported '${PLAN_RESULT}'"
             elif [ "${CHANGED_ENVS}" = "[]" ]; then
               echo "OK: plan had nothing to do -- detect-changes reported an empty environment array (e.g. a modules-only PR); GitHub reported this leg as '${PLAN_RESULT}'"
             else
@@ -565,8 +629,8 @@ jobs:
             echo "FAIL: module-test reported 'failure' -- terraform test did not pass"
             FAIL=1
           elif [ "${MODULE_TEST_RESULT}" = "skipped" ]; then
-            if [ "${EVENT}" = "push" ]; then
-              echo "OK: module-test is intentionally not present on push events (it only ever runs on pull_request); reported 'skipped'"
+            if [ "${EVENT}" = "push" ] || [ "${EVENT}" = "workflow_dispatch" ]; then
+              echo "OK: module-test is intentionally not present on push/workflow_dispatch events (it only ever runs on pull_request); reported 'skipped'"
             elif [ "${MODULES_CHANGED}" != "true" ]; then
               echo "OK: module-test had nothing to do -- detect-changes reported modules_changed=${MODULES_CHANGED}; this is an intentional skip"
             else
