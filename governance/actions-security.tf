@@ -35,6 +35,29 @@ resource "github_actions_organization_permissions" "this" {
     patterns_allowed = [
       "dorny/paths-filter@*",                     # Plan 02-04 -- terraform-core-network.yml's detect-changes job
       "marocchino/sticky-pull-request-comment@*", # Plan 02-04 -- terraform-core-network.yml's plan job (D-02 sticky comment)
+      # Plan 03-07 -- media-ci.yml (athena-app). Reproduced the IDENTICAL
+      # symptom Plan 02-04 already documented above: a real push to main
+      # after this workflow first landed reported `startup_failure` with
+      # zero jobs scheduled (confirmed live via `gh api .../check-suites`
+      # -- conclusion startup_failure, zero check-runs, zero jobs -- before
+      # this list named the actions below). golangci/golangci-lint-action,
+      # docker/setup-buildx-action and aquasecurity/trivy-action are each
+      # published by a GitHub-verified ORGANISATION (`gh api orgs/<org>
+      # --jq .is_verified` returns true for all three), but that
+      # org-profile verification badge is a DIFFERENT GitHub feature from
+      # the narrower Actions-Marketplace "verified creator" program this
+      # allowlist's `verified_allowed` flag actually checks -- conflating
+      # the two is exactly what caused this to be missed on first
+      # authoring. actions/setup-go, actions/upload-artifact,
+      # actions/download-artifact and github/codeql-action are NOT listed
+      # here -- all four are github-owned, already covered by
+      # `github_owned_allowed = true` above (confirmed: no rejection for
+      # any of the four in the same failed run's absence of jobs, since
+      # the run never reached the point of resolving individual steps at
+      # all).
+      "golangci/golangci-lint-action@*",
+      "docker/setup-buildx-action@*",
+      "aquasecurity/trivy-action@*",
     ]
   }
 }
