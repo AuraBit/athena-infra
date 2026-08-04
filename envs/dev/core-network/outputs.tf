@@ -4,6 +4,14 @@
 # `terraform output -json` in this directory reports, and exactly what
 # scripts/verify-network.sh (Task 2) reads and asserts against a real
 # `ec2 describe-vpcs` call (D-23, IAC-04).
+#
+# Comment-only touch (Plan 02-07, Task 2): this envs/dev/core-network-only
+# change is the live-verification PR for the "modules-only pull-request
+# path" acceptance criterion's other direction -- dorny/paths-filter should
+# report dev=true, modules=false, the module-test job should be skipped
+# (not run at all, since its own `if:` guard evaluates false), the plan
+# matrix should fan out to exactly one leg (dev), and the gate job should
+# report module-test's skip as an explicitly-reasoned, intentional pass.
 
 output "vpc_id" {
   description = "ID of the dev core-network VPC."
