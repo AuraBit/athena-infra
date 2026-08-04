@@ -6,6 +6,20 @@ to pause for human approval before it changes `stg` or `prod` — Phase 2's
 to the exact pattern recorded here. This document is the design contract
 those phases implement against; read it before writing the job, not after.
 
+**Status (Plan 02-06): live, not forward-looking.** Phase 2's gate is built.
+`.github/workflows/terraform-core-network.yml`'s `apply` job declares
+`environment: ${{ matrix.env }}`, bound at the job level (not per-step), and
+`governance/environments.tf` (Plan 02-06) provisions the six Environments
+that binding resolves against on `athena-infra`: `dev`, `stg`, `prod` (the
+apply job's targets — `stg`/`prod` carry a `reviewers` block naming the
+human developer, `dev` carries zero protection rules) and `dev-plan`,
+`stg-plan`, `prod-plan` (read-only counterparts for a future `plan`-job
+Environment binding, gated identically to nothing — see
+`environments.tf`'s own header for the plan-vs-apply split's reasoning).
+The rest of this document describes the general pattern both this stack and
+Phase 3's gitops promotion-commit job implement; the paragraph above is
+what actually exists today.
+
 ## Where the gate attaches
 
 The gate binds to the **promotion-commit job** — the workflow job that

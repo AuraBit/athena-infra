@@ -44,3 +44,18 @@ variable "developer_username" {
   type        = string
   default     = "YahiaEng"
 }
+
+variable "developer_user_id" {
+  description = <<-EOT
+    The human developer's numeric GitHub user id, used as a `users` entry in
+    athena-infra's infra_stg/infra_prod Environment `reviewers` blocks
+    (environments.tf, D-31) — GitHub's Environment reviewers API takes
+    numeric user/team ids, not logins, mirroring why protections.tf's
+    athena_ci_bot_user_id is also a resolved number rather than a login
+    string. Resolved live via `gh api /users/YahiaEng --jq .id` (Plan 02-06
+    execution, 2026-08-04); re-resolve with that same command, substituting
+    var.developer_username, if the developer's GitHub account ever changes.
+  EOT
+  type        = number
+  default     = 127671471
+}
