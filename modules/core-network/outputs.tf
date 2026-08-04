@@ -4,6 +4,13 @@
 # a real `ec2 describe-vpcs` call — the output-driven verification contract
 # (D-23) that every later addition to this module's output set must keep
 # satisfying.
+#
+# Comment-only touch (Plan 02-04, Task 3): this modules/core-network-only
+# change is the live-verification PR for the "modules-only PR plans zero
+# environments" acceptance criterion -- dorny/paths-filter should report
+# modules=true, dev/stg/prod=false, changed_envs=[], the plan matrix should
+# fan to zero legs (skipped, not failed), and the gate job should report
+# that skip as an explicitly-reasoned, intentional pass.
 
 output "vpc_id" {
   description = "ID of the VPC created by this module."
