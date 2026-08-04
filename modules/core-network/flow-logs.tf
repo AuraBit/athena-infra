@@ -1,5 +1,5 @@
-# flow-logs.tf — modules/core-network v0.5.0 (Plan 02-05, Task 2; CONTEXT.md
-# D-27, D-26).
+# flow-logs.tf — modules/core-network v1.0.1 (quick task 260804-esg, CR-01;
+# originally Plan 02-05, Task 2; CONTEXT.md D-27, D-26).
 #
 # Per-environment S3 bucket for VPC flow logs, plus the flow log itself.
 # This is the resource docs/tagging-standard.md's Protection-tag list names
@@ -56,10 +56,34 @@ resource "aws_kms_key" "flow_logs" {
   # and Decrypt on this key, or delivery to a KMS-encrypted destination
   # bucket fails silently on real AWS -- an omission that would only surface
   # the first time an actual flow record needed to be written, not at
-  # `terraform apply` time. Scoped with a StringEquals condition tying the
-  # grant to this specific flow log's source ARN so no other account's flow
-  # logs (or any other AWS-account use of this same service principal)
-  # could use this key.
+  # `terraform apply` time.
+  #
+  # The AllowVPCFlowLogsDelivery grant is scoped with a Condition keyed on
+  # aws:SourceAccount (StringEquals, this account's id) and aws:SourceArn
+  # (ArnLike, arn:aws:logs:<region>:<account_id>:*) -- the confused-deputy
+  # protection AWS's own VPC Flow Logs / CloudWatch Logs documentation
+  # prescribes for delivery.logs.amazonaws.com grants
+  # (https://docs.aws.amazon.com/vpc/latest/userguide/flow-logs-s3-permissions.html,
+  # "It is also a best practice to use the aws:SourceAccount and
+  # aws:SourceArn condition keys to protect against the confused deputy
+  # problem"). That page's own worked example, written for this bucket's S3
+  # policy rather than its key policy, is the reason the ArnLike value below
+  # is a wildcard logs-service ARN and not aws_flow_log.this.arn: AWS states
+  # explicitly that "the source ARN is the wildcard (*) ARN of the logs
+  # service" the delivery service itself presents -- not the ARN of the
+  # specific flow log resource that triggered delivery. Scoping to
+  # aws_flow_log.this.arn instead would not match what the delivery service
+  # actually sends and would silently break delivery, the exact failure
+  # mode this key policy exists to avoid.
+  #
+  # LocalStack does not enforce KMS key policies (its KMS emulation accepts
+  # any principal/action against a key policy document without evaluating
+  # Condition blocks), so this control cannot be verified by an observed
+  # AccessDenied in this project's local environment. It is verified by
+  # source (this comment matching the code), by `terraform plan`/`apply`
+  # succeeding with the Condition present, and by reading the applied
+  # policy back from each environment's LocalStack account
+  # (`awslocal kms get-key-policy`) -- not by a live denial.
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -83,6 +107,14 @@ resource "aws_kms_key" "flow_logs" {
           "kms:DescribeKey",
         ]
         Resource = "*"
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
+          ArnLike = {
+            "aws:SourceArn" = "arn:aws:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:*"
+          }
+        }
       },
     ]
   })
