@@ -46,3 +46,9 @@ terraform {
     use_path_style              = true
   }
 }
+
+# Plan 02-09 concurrency-queue drill: comment-only touch proving the
+# plan job (dev) is scheduled while an apply (dev) is in flight (2026-08-04T04:22:49Z).
+# This PR is closed without merging once the evidence is captured --
+# no config change is intended, only a real pull_request event on a
+# path detect-changes' dorny/paths-filter matches for dev.
