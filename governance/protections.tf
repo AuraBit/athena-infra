@@ -237,6 +237,14 @@ resource "github_repository_ruleset" "gitops_main" {
       required_check {
         context = "lint"
       }
+      # Plan 03-09 Task 3: the shared "gate" aggregator context — reported
+      # by render.yml's and promote.yml's gate jobs alike (the estate's
+      # one-required-check convention, cf. terraform-*.yml). Required only
+      # after render.yml's gate had reported success on main (two runs) —
+      # the confirm-before-require precedent.
+      required_check {
+        context = "gate"
+      }
     }
 
     pull_request {
