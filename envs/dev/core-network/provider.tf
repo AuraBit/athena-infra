@@ -27,6 +27,17 @@ provider "aws" {
     ec2 = "http://localhost:4566"
     iam = "http://localhost:4566"
     sts = "http://localhost:4566"
+    # kms (Plan 02-05, Task 2, Rule 3 deviation): added because
+    # flow-logs.tf's aws_kms_key had no endpoint override to catch it --
+    # without this entry the AWS provider silently sends KMS CreateKey
+    # requests to the REAL kms.us-east-1.amazonaws.com using this stack's
+    # fake LocalStack credentials, which real AWS correctly rejects with
+    # UnrecognizedClientException ("security token invalid"). Found live:
+    # every other service in this list already had this failure mode closed
+    # by an explicit override; kms was simply never added when this
+    # provider block was first written (Plan 02-01), because no resource
+    # used it until now.
+    kms = "http://localhost:4566"
   }
 
   default_tags {

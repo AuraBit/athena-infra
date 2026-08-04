@@ -36,3 +36,21 @@ variable "single_nat_gateway" {
   type        = bool
   default     = true
 }
+
+# --- Plan 02-05, Task 2: flow-logs bucket lifecycle -------------------------
+# Wired through explicitly (unlike availability_zones/subnet_newbits) so
+# dev's tfvars carries a real, visible value rather than relying silently on
+# the module's own default — this stack's action text calls out setting
+# "dev values in tfvars" specifically for these two.
+
+variable "flow_log_transition_days" {
+  description = "Days before a flow-log object transitions to STANDARD_IA."
+  type        = number
+  default     = 30
+}
+
+variable "flow_log_retention_days" {
+  description = "Days before a flow-log object expires entirely."
+  type        = number
+  default     = 365
+}

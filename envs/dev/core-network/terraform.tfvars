@@ -11,3 +11,8 @@
 name_prefix = "athena"
 environment = "dev"
 vpc_cidr    = "10.0.0.0/16"
+
+# Plan 02-05, Task 2: dev takes the module's own defaults explicitly here
+# (30/365) rather than leaving them implicit — see variables.tf's header.
+flow_log_transition_days = 30
+flow_log_retention_days  = 365

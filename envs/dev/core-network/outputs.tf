@@ -75,3 +75,20 @@ output "s3_vpc_endpoint_prefix_list_id" {
   description = "Prefix list id dev's S3 gateway endpoint injects into its attached route tables."
   value       = module.core_network.s3_vpc_endpoint_prefix_list_id
 }
+
+# --- Plan 02-05, Task 2: flow-logs bucket + flow log outputs ---------------
+
+output "flow_logs_bucket_name" {
+  description = "Name of dev's VPC flow-logs S3 bucket (athena-flowlogs-dev)."
+  value       = module.core_network.flow_logs_bucket_name
+}
+
+output "flow_logs_bucket_arn" {
+  description = "ARN of dev's VPC flow-logs S3 bucket."
+  value       = module.core_network.flow_logs_bucket_arn
+}
+
+output "flow_log_id" {
+  description = "ID of dev's VPC flow log."
+  value       = module.core_network.flow_log_id
+}
