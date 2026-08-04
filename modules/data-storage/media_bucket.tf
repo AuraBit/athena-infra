@@ -5,7 +5,7 @@
 # the media S3 bucket Plan 03-05's uploads stream into. Phase 6 grows this
 # module with RDS Postgres and ElastiCache Redis rather than inventing the
 # stack from a blank directory — this file's own shape (bucket + versioning
-# + public-access-block + encryption, no lifecycle) is deliberately the
+# + public-access-block + KMS encryption, no lifecycle) is deliberately the
 # smallest correct version of what modules/core-network's flow-logs.tf
 # already proved out for a different bucket.
 #
@@ -19,6 +19,8 @@
 # holds user-uploaded media, the estate's stand-in for irreplaceable user
 # data, so destroying it must be a deliberate, gated act once Phase 6's OPA
 # policy reads this tag.
+data "aws_caller_identity" "current" {}
+
 resource "aws_s3_bucket" "media" {
   # checkov:skip=CKV2_AWS_61: media objects are user-uploaded content with
   # no defined retention window — unlike the flow-logs bucket (which
@@ -57,19 +59,57 @@ resource "aws_s3_bucket_public_access_block" "media" {
   restrict_public_buckets = true
 }
 
-# SSE-S3 (AES256), not a customer-managed KMS key: unlike the flow-logs
-# bucket (audit evidence, where a separately-controlled key policy is the
-# point), this bucket's encryption requirement is simply "server-side
-# encryption configured" (D-07's own wording) with no distinct
-# access-boundary need beyond what S3-managed keys already provide.
-# Introducing a CMK here with no concrete requirement driving it would be
-# complexity added for its own sake, not a control.
+# Customer-managed KMS key, not SSE-S3 (AES256) — found live (Plan 03-02,
+# Task 1): Checkov's CKV_AWS_145 ("Ensure that S3 buckets are encrypted
+# with KMS by default") hard-fails an AES256-only configuration under this
+# repo's blocking gate (D-24), the same finding modules/core-network's
+# flow-logs.tf already resolved this same way. Unlike flow-logs.tf's key
+# policy (which must explicitly grant delivery.logs.amazonaws.com access,
+# since that AWS service — not this account — writes the objects), this
+# key's policy grants only account-root full access: every principal that
+# reads/writes media objects in this project acts under the same simulated
+# account's own credentials (D-16 — this estate's whole security model is
+# account-level via access keys, not per-principal IAM roles within an
+# account), so no cross-principal grant is needed at this stack's current
+# size. A future plan introducing a distinct media-service IAM role would
+# extend this key's policy the same way flow-logs.tf's does today, not
+# replace it.
+resource "aws_kms_key" "media" {
+  description             = "${var.name_prefix}-${var.environment} media bucket encryption key"
+  enable_key_rotation     = true
+  deletion_window_in_days = 7
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "AllowAccountRootFullAccess"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+    ]
+  })
+
+  tags = {
+    Name = "${var.name_prefix}-${var.environment}-media-key"
+  }
+}
+
+resource "aws_kms_alias" "media" {
+  name          = "alias/${var.name_prefix}-${var.environment}-media"
+  target_key_id = aws_kms_key.media.key_id
+}
+
 resource "aws_s3_bucket_server_side_encryption_configuration" "media" {
   bucket = aws_s3_bucket.media.id
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.media.arn
     }
+    bucket_key_enabled = true
   }
 }
