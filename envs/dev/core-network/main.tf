@@ -11,12 +11,15 @@
 # module version actually applied. An exact tag pin makes "what applied to
 # dev on 2026-08-03" an answerable, auditable question.
 module "core_network" {
-  source = "git::https://github.com/AuraBit/athena-infra.git//modules/core-network?ref=modules/core-network/v0.4.0"
+  source = "git::https://github.com/AuraBit/athena-infra.git//modules/core-network?ref=modules/core-network/v0.5.0"
 
   name_prefix        = var.name_prefix
   environment        = var.environment
   vpc_cidr           = var.vpc_cidr
   single_nat_gateway = var.single_nat_gateway
+
+  flow_log_transition_days = var.flow_log_transition_days
+  flow_log_retention_days  = var.flow_log_retention_days
 
   # availability_zones/subnet_newbits deliberately not overridden here: the
   # module's own defaults (three us-east-1 AZs, /20 subnets) already match

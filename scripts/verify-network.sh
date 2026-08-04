@@ -369,6 +369,73 @@ else
         fi
       fi
     fi
+
+    # -------------------------------------------------------------------
+    # VPC flow logs into the per-env flow-logs bucket (Plan 02-05, Task 2;
+    # D-27). Bucket existence/versioning/public-access-block/lifecycle are
+    # each asserted independently via a real API call rather than inferred
+    # from `terraform apply`'s exit code — an apply that reports success
+    # against a bucket LocalStack silently failed to fully configure is
+    # exactly the fake-success class IAC-04 exists to catch. If LocalStack's
+    # S3/EC2 emulation genuinely does not implement one of these calls at
+    # the fidelity needed, that is a real FAIL here, recorded in the plan's
+    # SUMMARY and docs/localstack-service-coverage.md (Plan 02-11) — never
+    # silently weakened to make this script pass.
+    # -------------------------------------------------------------------
+    FLOW_BUCKET="$(printf '%s' "${OUTPUT_JSON}" | jq -r '.flow_logs_bucket_name.value // empty' 2>/dev/null)"
+    if [ -z "${FLOW_BUCKET}" ]; then
+      check "${env_name}: flow_logs_bucket_name output is present" 1 \
+        "terraform output -json has no .flow_logs_bucket_name.value key"
+    else
+      HEAD_BUCKET_OUT="$(aws_ls s3api head-bucket --bucket "${FLOW_BUCKET}" 2>&1)"
+      HEAD_BUCKET_EXIT=$?
+      check "${env_name}: flow-logs bucket ${FLOW_BUCKET} exists (s3api head-bucket)" "${HEAD_BUCKET_EXIT}" "${HEAD_BUCKET_OUT}"
+
+      VERSIONING_STATUS="$(aws_ls s3api get-bucket-versioning --bucket "${FLOW_BUCKET}" --query 'Status' --output text 2>/dev/null)"
+      if [ "${VERSIONING_STATUS}" = "Enabled" ]; then
+        check "${env_name}: flow-logs bucket versioning is Enabled" 0
+      else
+        check "${env_name}: flow-logs bucket versioning is Enabled" 1 \
+          "observed Status=[${VERSIONING_STATUS}]"
+      fi
+
+      PAB_JSON="$(aws_ls s3api get-public-access-block --bucket "${FLOW_BUCKET}" --output json 2>/dev/null)"
+      PAB_ALL_TRUE="$(printf '%s' "${PAB_JSON}" | jq -r '
+        .PublicAccessBlockConfiguration
+        | (.BlockPublicAcls == true and .BlockPublicPolicy == true and .IgnorePublicAcls == true and .RestrictPublicBuckets == true)
+      ' 2>/dev/null)"
+      if [ "${PAB_ALL_TRUE}" = "true" ]; then
+        check "${env_name}: flow-logs bucket public access block is fully on (all four settings true)" 0
+      else
+        check "${env_name}: flow-logs bucket public access block is fully on (all four settings true)" 1 \
+          "observed=[${PAB_JSON}]"
+      fi
+
+      LIFECYCLE_RULE_COUNT="$(aws_ls s3api get-bucket-lifecycle-configuration --bucket "${FLOW_BUCKET}" --query 'Rules' --output json 2>/dev/null | jq 'length' 2>/dev/null)"
+      if [ -n "${LIFECYCLE_RULE_COUNT}" ] && [ "${LIFECYCLE_RULE_COUNT}" -ge 1 ] 2>/dev/null; then
+        check "${env_name}: flow-logs bucket has a lifecycle configuration with at least one rule (${LIFECYCLE_RULE_COUNT})" 0
+      else
+        check "${env_name}: flow-logs bucket has a lifecycle configuration with at least one rule" 1 \
+          "observed rule count=[${LIFECYCLE_RULE_COUNT:-<none>}]"
+      fi
+    fi
+
+    FLOW_LOG_ID="$(printf '%s' "${OUTPUT_JSON}" | jq -r '.flow_log_id.value // empty' 2>/dev/null)"
+    if [ -z "${FLOW_LOG_ID}" ]; then
+      check "${env_name}: flow_log_id output is present" 1 \
+        "terraform output -json has no .flow_log_id.value key"
+    else
+      FLOW_LOG_DESCRIBE="$(aws_ls ec2 describe-flow-logs --flow-log-ids "${FLOW_LOG_ID}" --output json)"
+      FLOW_LOG_RESOURCE_ID="$(printf '%s' "${FLOW_LOG_DESCRIBE}" | jq -r '.FlowLogs[0].ResourceId // empty' 2>/dev/null)"
+      FLOW_LOG_STATUS="$(printf '%s' "${FLOW_LOG_DESCRIBE}" | jq -r '.FlowLogs[0].FlowLogStatus // empty' 2>/dev/null)"
+
+      if [ "${FLOW_LOG_RESOURCE_ID}" = "${VPC_ID}" ] && [ "${FLOW_LOG_STATUS}" = "ACTIVE" ]; then
+        check "${env_name}: flow log (${FLOW_LOG_ID}) targets ${VPC_ID}, status ACTIVE" 0
+      else
+        check "${env_name}: flow log targets ${VPC_ID}, status ACTIVE" 1 \
+          "observed ResourceId=[${FLOW_LOG_RESOURCE_ID}] FlowLogStatus=[${FLOW_LOG_STATUS}]"
+      fi
+    fi
   done
 fi
 
