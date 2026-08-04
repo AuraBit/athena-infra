@@ -55,3 +55,22 @@ check "athena_infra_bot_token_present" {
     error_message = "athena-infra is missing the ATHENA_CI_BOT_TOKEN Actions secret — the Terraform workflows' sticky-comment steps depend on it. Provision it per docs/runbooks/github-bootstrap.md."
   }
 }
+
+# Added 2026-08-05 (Phase 3 security review, T-03-60 drill divergence #2):
+# promote.yml's commit job runs IN athena-gitops and checks out with this
+# secret — its absence there was invisible to the two checks above and
+# surfaced only when the drill's first approved promotion failed
+# post-approval. Same presence-assertion custody model as the others.
+data "github_actions_secrets" "athena_gitops" {
+  name = github_repository.athena_gitops.name
+}
+
+check "athena_gitops_bot_token_present" {
+  assert {
+    condition = contains(
+      [for s in data.github_actions_secrets.athena_gitops.secrets : s.name],
+      "ATHENA_CI_BOT_TOKEN"
+    )
+    error_message = "athena-gitops is missing the ATHENA_CI_BOT_TOKEN Actions secret — promote.yml's commit job cannot push the gated promotion. Provision it per docs/runbooks/github-bootstrap.md (bot PAT, push scope on athena-gitops)."
+  }
+}

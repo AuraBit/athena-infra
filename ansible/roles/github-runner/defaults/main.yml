@@ -58,11 +58,14 @@ athena_runner_labels:
 # actually uses it. A dedicated "athena-selfhosted" runner group (id 3) was
 # created for this plan via a live API call (the Terraform GitHub provider
 # does not manage runner groups — see docs/runbooks/github-bootstrap.md's
-# provider-coverage-gaps section), scoped via visibility=selected to
-# athena-infra only (the sole repo whose workflows target self-hosted
-# today), with allows_public_repositories explicitly enabled since
-# athena-infra is public. See docs/runbooks/runner-ops.md's Blast radius
-# section for the full reasoning.
+# provider-coverage-gaps section), scoped via visibility=selected to the
+# repos whose workflows target self-hosted: athena-infra (Phase 2), plus
+# athena-app and athena-gitops (added 2026-08-05 for Phase 3's media-ci
+# build/publish/handoff and promote.yml resolve jobs — their absence
+# presents as jobs stuck `queued` while runners show online/idle), with
+# allows_public_repositories explicitly enabled since every estate repo is
+# public. See docs/runbooks/runner-ops.md's Blast radius section for the
+# full reasoning.
 athena_runner_group_id: 3
 athena_runner_group_name: "athena-selfhosted"
 
