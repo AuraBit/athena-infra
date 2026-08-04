@@ -1,0 +1,42 @@
+# coredns-custom.yaml — resolves `host.k3d.internal` to this cluster's own docker
+# bridge gateway (Plan 03, Task 1; Phase 2 deferred-items.md item 3; CONTEXT.md
+# D-02's upload-path precondition).
+#
+# k3d's shipped CoreDNS Corefile already imports both
+# `/etc/coredns/custom/*.override` (directives merged INTO the existing default
+# `.:53` server block) and `/etc/coredns/custom/*.server` (a brand-new, independently
+# imported server block, scoped to whatever zone it declares) — these are two
+# distinct, documented k3s/rke2 CoreDNS extension points, not one.
+#
+# DEVIATION from RESEARCH.md's originally-researched shape (Rule 1 - bug, found live
+# at execution): RESEARCH.md's Pitfall 1 proposed a `hosts.override` key containing a
+# bare `hosts { ... }` block. Proven live this session: the default `.:53` block
+# already runs `hosts /etc/coredns/NodeHosts { ... }` (visible in the shipped
+# Corefile, `kubectl -n kube-system get cm coredns -o jsonpath='{.data.Corefile}'`),
+# and CoreDNS hard-errors — CrashLoopBackOff, "plugin/hosts: this plugin can only be
+# used once per Server Block" — the instant a *second* `hosts` block lands in that
+# same server block via `.override`. The fix is the `.server` key instead: it opens
+# an independent server block scoped to exactly `host.k3d.internal:53`, which is
+# free to run its own `hosts` plugin without colliding with the default block's
+# existing one. `fallthrough` inside it is defensive (this block only ever receives
+# queries for its own zone) but kept for consistency with the house pattern and so a
+# future additional entry in this same block degrades safely instead of NXDOMAIN-ing.
+#
+# __GATEWAY_IP__ is a placeholder substituted at apply time by
+# scripts/apply-coredns-custom.sh — docker assigns this cluster's own bridge gateway
+# IP at network-creation time, so it is NEVER a fixed literal here. Re-derive by hand
+# with:
+#   docker network inspect k3d-app --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+data:
+  hostk3dinternal.server: |
+    host.k3d.internal:53 {
+      hosts {
+        __GATEWAY_IP__ host.k3d.internal
+        fallthrough
+      }
+    }
