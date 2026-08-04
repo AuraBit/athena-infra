@@ -1,0 +1,166 @@
+name: rebuild-world
+
+# D-19: the manually-triggered full-estate re-apply drill workflow (Plan
+# 02-10). LocalStack's ephemerality (docs/runbooks/world-rebuild.md) means a
+# host restart, a `docker compose down`, or a deliberate drill wipes every
+# AWS-stack Terraform state file together with the resources it describes --
+# state lives INSIDE LocalStack S3 itself (Plan 02-01's D-18), so a restart
+# never leaves Terraform believing a resource exists when it doesn't. This
+# workflow is how the estate comes back from that: one dispatch, every
+# environment of every stack, in dependency order, timed and recorded
+# (docs/drills/world-rebuild.md) -- the recurring disaster-recovery practice
+# Phase 1's original runbook promised and Phase 7's restore drills build on.
+#
+# Only ever `workflow_dispatch` -- never `push`, never `pull_request`. A
+# rebuild is a deliberate, human-initiated recovery action, not something
+# that should ever fire on ordinary code movement.
+#
+# Stack and environment lists are explicit, ordered values (this file's
+# `select-environments` job output, plus the job graph itself), not buried
+# inside a single matrix expression: today there is exactly one stack
+# (Core/Network). Phase 6 adds Data/Storage and Application/Compute -- when
+# it does, extend this file with one new `rebuild-<stack>` job per stack,
+# each depending on (`needs:`) the job for the stack before it, so a
+# Data/Storage rebuild can never start before Core/Network's VPC/subnet
+# outputs (which it reads via remote state) exist. Environments WITHIN one
+# stack, by contrast, are independent simulated AWS accounts with no
+# cross-account resource references (the same reasoning
+# terraform-core-network.yml's own `apply` job matrix already relies on), so
+# they fan out in parallel via `strategy.matrix`, not a further ordered list.
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Which environment(s) of the Core/Network stack to rebuild"
+        required: true
+        type: choice
+        options: [all, dev, stg, prod]
+        default: all
+
+permissions:
+  contents: read
+
+env:
+  # Single source of truth, matching terraform-core-network.yml's own env
+  # block -- see that file's header comment for why this literal must agree
+  # across every job in the estate that installs Terraform.
+  TF_VERSION: "1.15.8"
+
+jobs:
+  # ---------------------------------------------------------------------
+  # select-environments -- turns the workflow_dispatch input into the JSON
+  # array strategy.matrix.env below consumes, the same shape
+  # terraform-core-network.yml's detect-changes job uses for its own
+  # env-only-matrix step (Plan 02-09), reused here rather than invented
+  # again because a workflow_dispatch run, like that one, has no file diff
+  # to derive an environment list from -- the operator names it directly.
+  # ---------------------------------------------------------------------
+  select-environments:
+    runs-on: ubuntu-latest
+    outputs:
+      environments: ${{ steps.select.outputs.result }}
+    steps:
+      - id: select
+        run: |
+          set -euo pipefail
+          case "${{ inputs.target_environment }}" in
+            all)  RESULT='["dev","stg","prod"]' ;;
+            dev)  RESULT='["dev"]' ;;
+            stg)  RESULT='["stg"]' ;;
+            prod) RESULT='["prod"]' ;;
+            *) echo "unknown target_environment '${{ inputs.target_environment }}'" >&2; exit 1 ;;
+          esac
+          echo "environments (Core/Network stack): ${RESULT}"
+          echo "result=${RESULT}" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------
+  # rebuild-core-network -- Stack 1 of N (Phase 6 adds rebuild-data-storage
+  # and rebuild-application-compute jobs here, each
+  # `needs: [select-environments, rebuild-core-network]`, to preserve stack
+  # dependency order).
+  #
+  # Copies terraform-core-network.yml's `apply` job shape verbatim rather
+  # than inventing a second one (this plan's own instruction): the same
+  # self-hosted label set, the same per-environment concurrency group (a
+  # rebuild must contend with a normal apply for the same environment, not
+  # bypass it -- see that job's own comment for why this placement is
+  # load-bearing, not stylistic), the same `environment: ${{ matrix.env }}`
+  # binding (so stg and prod still pause for the human reviewer -- a
+  # rebuild that skipped this gate would be a second, ungated path to
+  # changing prod, exactly the kind of second path that quietly undermines
+  # a control, T-02-44), the same fresh-plan-then-apply sequence, and the
+  # same verify-network.sh step as the final step of each leg (T-02-45/46).
+  # ---------------------------------------------------------------------
+  rebuild-core-network:
+    needs: select-environments
+    runs-on: [self-hosted, linux, x64, athena-local]
+    strategy:
+      fail-fast: false
+      matrix:
+        env: ${{ fromJSON(needs.select-environments.outputs.environments) }}
+    environment: ${{ matrix.env }}
+    concurrency:
+      group: terraform-core-${{ matrix.env }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: envs/${{ matrix.env }}/core-network
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: export ${{ matrix.env }}'s LocalStack credentials from this Environment's variables (D-13)
+        # Identical to terraform-core-network.yml's `apply` job step of the
+        # same name -- this job binds `environment: ${{ matrix.env }}` too,
+        # so `vars.*` resolves against that same GitHub Environment's
+        # variables.
+        run: |
+          set -euo pipefail
+          : "${AWS_ACCESS_KEY_ID:?vars.AWS_ACCESS_KEY_ID is not set for the '${{ matrix.env }}' GitHub Environment -- see docs/runbooks/runner-ops.md}"
+          {
+            echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
+            echo "AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}"
+          } >> "$GITHUB_ENV"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ vars.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ vars.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        # No manual state-bucket-creation step here: LocalStack's own
+        # ready.d init hook (localstack/init/ready.d/create-state-buckets.sh,
+        # D-18) recreates athena-tfstate-{dev,stg,prod} by itself the moment
+        # the container comes back up healthy after a restart -- this is
+        # exactly what makes an unattended rebuild possible at all, and is
+        # confirmed live in docs/drills/world-rebuild.md.
+        run: terraform init -input=false
+
+      - name: terraform plan (fresh plan against the post-restart account)
+        run: |
+          set -euo pipefail
+          terraform plan -out=tfplan -input=false -no-color | tee plan-output.txt
+
+      - name: write the rebuild plan's summary to the job summary
+        run: |
+          {
+            echo "### rebuild-world -- ${{ matrix.env }} (core-network)"
+            echo '```'
+            cat plan-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: terraform apply
+        run: terraform apply -input=false tfplan
+
+      - name: verify-network.sh (IAC-04 -- same gate the normal apply job runs, same job so it inherits the concurrency group above)
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/verify-network.sh ${{ matrix.env }}
