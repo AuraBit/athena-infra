@@ -125,6 +125,33 @@ identical default VPC (`172.31.0.0/16`) under every simulated account —
 its own scaffolding, not Athena-managed, and not cross-environment
 leakage of anything this project created.
 
+**Second honest wrinkle, found live in Plan 03-02**: the account boundary
+above is an *enumeration* boundary, not a per-resource *authorization*
+boundary, and the two are not the same guarantee. `s3 ls` under stg's
+credentials correctly omits dev's `athena-media-dev` bucket — confirmed
+again for this plan's own bucket, not just core-network's. But a
+*direct-addressed* call naming that bucket explicitly (`s3api head-bucket
+--bucket athena-media-dev`, `s3api get-bucket-tagging --bucket
+athena-media-dev`) under stg's simulated credentials **succeeds**, not
+fails — LocalStack's Hobby-tier S3 emulation does not enforce
+cross-account IAM authorization for resource-addressed calls, only for
+listing. This mirrors real AWS's own S3 namespace shape more than it
+first appears (S3 bucket names are genuinely global across all AWS
+accounts, not per-account, unlike a VPC id) but real AWS still returns
+`403 Forbidden` for a direct call against a bucket your IAM principal has
+no policy grant on; LocalStack's Hobby tier does not evaluate bucket
+policies/IAM at all, so every direct call the *namespace* permits also
+*succeeds*, regardless of caller account. `ec2 describe-vpcs` has no
+equivalent gap (VPC ids are account-scoped resource identifiers, not a
+global namespace, and LocalStack's EC2 emulation genuinely partitions
+them per simulated account). This is a real LocalStack fidelity
+limitation, not a defect in this project's Terraform: `modules/data-storage`'s
+bucket already carries the production-shaped controls (versioning, SSE,
+all-four public-access-block settings, the `Protection` tag) that would
+matter against real AWS's own IAM enforcement — see the STRIDE register's
+`T-03-10` (accept) in `03-02-PLAN.md` for the disposition this finding
+confirms rather than contradicts.
+
 ## Where state lives, and why
 
 Two different Terraform state stories exist across this project, and the
