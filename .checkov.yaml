@@ -36,6 +36,11 @@
 # .github/workflows/terraform-core-network.yml adds an explicit
 # scanned-resource-count guard immediately after every invocation of this
 # config for exactly this reason.
+#
+# external-checks-dir (Plan 02-05, Task 1; D-26): loads
+# checkov/custom/athena_required_tags.py (CKV_ATHENA_1), the estate's
+# machine-enforced mandatory-tag check — see docs/tagging-standard.md and
+# that file's own docstring for the full design rationale.
 
 framework:
   - terraform
@@ -43,6 +48,9 @@ framework:
 directory:
   - modules
   - envs
+
+external-checks-dir:
+  - checkov/custom
 
 quiet: true
 compact: true
