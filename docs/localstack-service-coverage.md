@@ -71,13 +71,59 @@ exactly these four values (see this file's `<output>` record in
 
 | Service | Consumer (phase / requirement) | LocalStack tier required | Verification mode | Divergence note |
 |---|---|---|---|---|
-| s3 | Phase 2 IAC-01/IAC-02 (Terraform S3 state backend); Phase 7 DR-01 (Velero backups) | Hobby (free, account + token) | emulated | — |
+| s3 | Phase 2 IAC-01/IAC-02 (Terraform S3 state backend, proven under real concurrent-apply conditions — see "Phase 2 verification depth" below); Phase 7 DR-01 (Velero backups) | Hobby (free, account + token) | emulated | — |
 | iam | Phase 2 IAC-01 (governance-stack roles/policies); Phase 6 IAC-01 (EKS/Karpenter IAM) | Hobby | emulated | — |
-| ec2 | Phase 2 IAC-01 (Core/Network stack: VPC, subnets, security groups, IP reservations) | Hobby | emulated | — |
+| ec2 | Phase 2 IAC-01/IAC-03 (Core/Network stack: full VPC/subnet/NAT/route/endpoint/security-group/flow-log resource set, live across three simulated accounts — see "Phase 2 verification depth" below) | Hobby | emulated | — |
 | rds | Phase 6 IAC-01 (Data/Storage stack: Postgres) | Ultimate (paid on Hobby — confirmed live: `describe-db-instances` returns a license-gated `InternalFailure`) | code+docs-only | Terraform for `aws_db_instance` ships production-grade and would apply cleanly against real AWS; against this Hobby-tier account the API is license-gated, so it is never claimed as apply-verified locally. The running app talks to a plain containerized Postgres instead (see README "State locality" and project `.claude/CLAUDE.md`'s Postgres row). Moves to `emulated` if the OSS Program application — deliberately deferred as of 2026-08-03 pending a more built-out public estate, not yet submitted (see "Tier reality" above) — is later submitted and approved. |
 | elasticache | Phase 6 IAC-01 (Data/Storage stack: Redis/Valkey sessions) | Ultimate | code+docs-only | Same license-gated `InternalFailure` confirmed live for `describe-cache-clusters`. The app's session store runs as a plain containerized Valkey instance instead. Same OSS Program approval path as `rds`. |
 | cloudfront | Phase 6 IAC-01 (media CDN, `media-<env>.athena.net`) | Ultimate | code+docs-only | Confirmed live: `list-distributions` returns the same license-gated `InternalFailure`. CloudFront's edge-CDN behavior has no meaningful local stand-in regardless of tier (no real edge network to emulate locally) — this row is expected to stay `code+docs-only` even after OSS Program approval, and that expectation is recorded here rather than left implicit. |
 | eks | Phase 6 IAC-01/IAC-06 (Application/Compute stack: cluster + node pools) | Ultimate | code+docs-only | Confirmed live: `list-clusters` returns the same license-gated `InternalFailure`. k3d already stands in for the actually-running cluster (CONTEXT.md D-14); this Terraform resource exists to prove the IaC authoring pattern, not to stand up a real control plane locally — the same caveat `.claude/CLAUDE.md` already applies to Karpenter (real EC2 Fleet/Spot APIs have no free local emulation at the fidelity Karpenter's scheduler logic needs), `code+docs-only` regardless of LocalStack tier. |
+
+## Phase 2 verification depth (Core/Network)
+
+Plan 03's `ec2`/`s3` rows above were originally recorded genuinely emulated
+on the basis of a single `describe-vpcs` and a single S3 round trip.
+Phase 2 (`docs/adr/0004` through `0011`) exercised both services far
+harder, against the real Core/Network resource set, and every one of the
+following was proven by a live `describe`/`get`/`head` call — not inferred
+from `terraform apply`'s own exit code (`scripts/verify-network.sh`,
+25 checks):
+
+- **`ec2`**: VPCs, subnets across all three availability zones, internet
+  and NAT gateways (including per-AZ placement under
+  `single_nat_gateway = false`), route tables and their associations
+  (including the `public_route_table_id`'s own `0.0.0.0/0`-to-IGW route,
+  Plan 02-10's own closed coverage gap), a gateway VPC endpoint, and
+  security groups including default-security-group adoption/lockdown.
+- **`s3`**: bucket create/put/get/delete round trips as before, plus —
+  this phase's single open technical risk, now settled by observation —
+  **S3 conditional writes (`If-None-Match`) genuinely backing Terraform's
+  native `use_lockfile = true` state locking** through a real acquire /
+  contention / release cycle (`scripts/verify-tfstate-locking.sh`, Plan
+  02-01) and under real concurrent CI applies (the concurrency-queue
+  drill, `docs/drills/concurrency-queue.md`). RESEARCH.md's Open Question 1
+  flagged this as unconfirmed by any source found during research; it is
+  no longer an open question.
+
+**No LocalStack fidelity shortfall was found for any Core/Network resource
+class this phase exercised.** Every resource in the list above applied and
+verified cleanly against the running Hobby-tier account across all three
+promotion cycles (dev, stg, prod) — the `ec2`/`s3` rows' Divergence note
+stays `—` on that basis, recorded here explicitly rather than left for a
+reader to assume no gap was looked for.
+
+**Account-per-environment finding**: `docs/adr/0009-simulated-account-per-environment-and-state-bucket-per-account.md`
+records the full decision; the coverage-relevant fact is that LocalStack's
+account-per-access-key-ID namespacing (D-16) genuinely worked on the free
+Hobby tier — confirmed live under each environment's own credentials via
+`sts get-caller-identity` (correct account ID), `s3 ls` (no
+cross-environment bucket visibility), and `ec2 describe-vpcs` (each
+environment's own `/16` supernet visible in exactly one account, no
+other). The documented single-account-with-tag-separation fallback
+(CONTEXT.md D-16) was not needed. One honest wrinkle: LocalStack seeds an
+identical default VPC (`172.31.0.0/16`) under every simulated account —
+its own scaffolding, not Athena-managed, and not cross-environment
+leakage of anything this project created.
 
 ## Where state lives, and why
 
