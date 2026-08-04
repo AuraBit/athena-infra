@@ -188,6 +188,46 @@ jobs:
         run: bash scripts/verify-checkov-skips.sh
 
   # ---------------------------------------------------------------------
+  # module-test -- ubuntu-latest, PR-only, same-repo-branch only (ADR-0006 /
+  # D-10), runs only when detect-changes reports modules/core-network
+  # changed. D-11 places jobs needing localhost:4566 on the self-hosted
+  # runner and everything else on ubuntu-latest; `terraform test` here uses
+  # mock_provider (Plan 02-07, Task 1) and reaches nothing at all, so by
+  # that same rule it belongs on ubuntu-latest even sitting alongside
+  # self-hosted `plan`/`apply` in this same job graph -- this refines what
+  # 02-CONTEXT.md originally anticipated (a LocalStack-backed module test):
+  # mocking turned out to make that unnecessary, and a test needing no
+  # environment can run on any runner and cannot be flaky because of one.
+  # Guarded with the same same-repository head check every other
+  # pull-request-triggered job in this file carries, so the condition set
+  # stays uniform even though this job happens to run on a hosted runner.
+  # ---------------------------------------------------------------------
+  module-test:
+    needs: detect-changes
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && needs.detect-changes.outputs.modules_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: modules/core-network
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init (no backend -- mock_provider needs no state, no credentials, no LocalStack)
+        run: terraform init -backend=false -input=false
+
+      - name: terraform test (D-09 -- mock-provider unit tests proving the module before it becomes taggable)
+        run: terraform test
+
+  # ---------------------------------------------------------------------
   # plan -- self-hosted, matrix over detect-changes' env array. PR-only,
   # same-repo-branch only (ADR-0006 / D-10). Declares NO `environment:`
   # (a gated Environment would pause every stg/prod plan on every pull
@@ -414,9 +454,16 @@ jobs:
   # `if: always()` so this job runs regardless of any upstream failure --
   # it is the thing that DECIDES pass/fail, not something that should be
   # skipped just because something upstream already went red.
+  #
+  # Adding `module-test` to `needs` here does NOT change what the required
+  # check itself means: main's ruleset (governance/protections.tf, D-32)
+  # names only this job (`gate`), never an individual leg, so a reader
+  # seeing this new `needs` entry does not also need to touch governance --
+  # this comment exists because that is exactly the question a reasonable
+  # reader would otherwise be left to guess at.
   # ---------------------------------------------------------------------
   gate:
-    needs: [detect-changes, static, plan]
+    needs: [detect-changes, static, plan, module-test]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -429,14 +476,18 @@ jobs:
           DETECT_RESULT="${{ needs.detect-changes.result }}"
           STATIC_RESULT="${{ needs.static.result }}"
           PLAN_RESULT="${{ needs.plan.result }}"
+          MODULE_TEST_RESULT="${{ needs.module-test.result }}"
           EVENT="${{ github.event_name }}"
           CHANGED_ENVS='${{ needs.detect-changes.outputs.changed_envs }}'
+          MODULES_CHANGED='${{ needs.detect-changes.outputs.modules_changed }}'
 
           echo "detect-changes.result = ${DETECT_RESULT}"
           echo "static.result         = ${STATIC_RESULT}"
           echo "plan.result           = ${PLAN_RESULT}"
+          echo "module-test.result    = ${MODULE_TEST_RESULT}"
           echo "event_name            = ${EVENT}"
           echo "changed_envs           = ${CHANGED_ENVS}"
+          echo "modules_changed        = ${MODULES_CHANGED}"
           echo
 
           FAIL=0
@@ -492,6 +543,34 @@ jobs:
               echo "OK: plan had nothing to do -- detect-changes reported an empty environment array (e.g. a modules-only PR); GitHub reported this leg as '${PLAN_RESULT}'"
             else
               echo "FAIL: plan reported '${PLAN_RESULT}' but detect-changes reported changed_envs=${CHANGED_ENVS} -- a leg that should have run either did not run at all (see ADR-0006 if this is a fork PR) or ran and failed"
+              FAIL=1
+            fi
+          fi
+
+          # module-test's own `if:` (unlike plan's matrix) is a plain
+          # boolean guard with no matrix underneath it, so it does not carry
+          # plan's empty-matrix "failure"-instead-of-"skipped" quirk: a
+          # guard that evaluates false reports "skipped" here, genuinely.
+          # The same two-condition test still applies, though, following
+          # exactly the pattern the plan leg above uses -- module-test never
+          # runs on push (it is PR-only, by design, same as plan), and a
+          # "skipped" result is intentional only when detect-changes agrees
+          # modules did not change; anything else (a fork PR touching
+          # modules, or a genuine failure) is a leg that should have proven
+          # the module and did not, which this gate must not wave through.
+          if [ "${MODULE_TEST_RESULT}" = "cancelled" ]; then
+            echo "FAIL: module-test was cancelled"
+            FAIL=1
+          elif [ "${MODULE_TEST_RESULT}" = "failure" ]; then
+            echo "FAIL: module-test reported 'failure' -- terraform test did not pass"
+            FAIL=1
+          elif [ "${MODULE_TEST_RESULT}" = "skipped" ]; then
+            if [ "${EVENT}" = "push" ]; then
+              echo "OK: module-test is intentionally not present on push events (it only ever runs on pull_request); reported 'skipped'"
+            elif [ "${MODULES_CHANGED}" != "true" ]; then
+              echo "OK: module-test had nothing to do -- detect-changes reported modules_changed=${MODULES_CHANGED}; this is an intentional skip"
+            else
+              echo "FAIL: module-test reported 'skipped' but detect-changes reported modules_changed=${MODULES_CHANGED} -- a leg that should have proven the module either did not run at all (see ADR-0006 if this is a fork PR) or was otherwise skipped incorrectly"
               FAIL=1
             fi
           fi
