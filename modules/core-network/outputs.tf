@@ -99,3 +99,27 @@ output "flow_log_id" {
   description = "ID of the VPC flow log delivering to flow_logs_bucket_name."
   value       = aws_flow_log.this.id
 }
+
+# --- Plan 02-05, Task 3: default security group + baseline SG outputs ------
+#
+# These are Phase 6's remote-state consumption surface (D-28) -- both
+# output NAMES are stable and deliberately descriptive; renaming either one
+# later breaks a downstream `data "terraform_remote_state"` consumer that
+# has already started reading it. baseline_security_group_ids is keyed by
+# purpose ("allow-internal-vpc", "vpc-endpoints"), not by the Terraform
+# resource's own local name, so a consumer's lookup key matches this
+# module's own resource-naming convention (Name tag / SG name), not an
+# internal implementation detail.
+
+output "default_security_group_id" {
+  description = "ID of this VPC's default security group, adopted and stripped to zero ingress/egress rules (D-28)."
+  value       = aws_default_security_group.this.id
+}
+
+output "baseline_security_group_ids" {
+  description = "Map of baseline security group purpose -> id: \"allow-internal-vpc\" and \"vpc-endpoints\" (D-28). Phase 6's compute and data-storage stacks consume these by key via remote state rather than each defining their own equivalent."
+  value = {
+    "allow-internal-vpc" = aws_security_group.allow_internal_vpc.id
+    "vpc-endpoints"      = aws_security_group.vpc_endpoints.id
+  }
+}
