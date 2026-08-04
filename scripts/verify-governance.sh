@@ -312,10 +312,25 @@ done
 # 10. athena-infra's main ruleset requires the aggregator check by its exact
 #     reported name (D-32). The expected context is extracted from
 #     terraform-core-network.yml itself, not typed a second time here: the
-#     aggregator job is identified structurally (needs exactly
-#     [detect-changes, static, plan] and `if: always()`, matching that
-#     job's own header comment), so a rename of the job in the workflow
-#     changes what this script expects instead of silently going stale.
+#     aggregator job is identified structurally -- its `needs:` list must be
+#     a SUPERSET of {detect-changes, static, plan} (subset match, not exact
+#     equality) and it must carry `if: always()`, matching that job's own
+#     header comment.
+#
+#     Subset, not equality, is intentional: `gate` is expected to keep
+#     acquiring further legs as this pipeline grows (Plan 02-07 added
+#     `module-test`; Phase 6 will add more) without this script going stale
+#     every time that happens -- an exact-list comparison would report a
+#     false FAIL the moment a real, correctly-configured leg was added,
+#     which is precisely CR-02's defect. What the subset check still
+#     refuses to match is a job that LOST one of the three original
+#     required legs -- {detect-changes, static, plan} not all being present
+#     in `needs:` means the match fails, so a genuine regression (a leg
+#     silently dropped from `gate`'s dependencies) is still caught. The
+#     single-match `break` keeps the function deterministic: the first job
+#     satisfying both conditions wins, and a workflow with two such jobs
+#     would be a different, worse problem this script is not trying to
+#     paper over.
 # ---------------------------------------------------------------------------
 aggregator_job_id() {
   python3 - "${SCRIPT_DIR}/../.github/workflows/terraform-core-network.yml" <<'PY' 2>/dev/null
@@ -323,11 +338,12 @@ import sys, yaml
 try:
     with open(sys.argv[1]) as f:
         data = yaml.safe_load(f)
+    required = {"detect-changes", "static", "plan"}
     for job_id, job in data["jobs"].items():
         needs = job.get("needs", [])
         if isinstance(needs, str):
             needs = [needs]
-        if sorted(needs) == sorted(["detect-changes", "static", "plan"]) and job.get("if") == "always()":
+        if required.issubset(set(needs)) and job.get("if") == "always()":
             print(job_id)
             break
 except Exception:
