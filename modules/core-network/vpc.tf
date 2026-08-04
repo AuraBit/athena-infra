@@ -14,11 +14,10 @@
 # not in consuming someone else's abstraction.
 
 resource "aws_vpc" "this" {
-  # checkov:skip=CKV2_AWS_11: Flow logs land in a per-env S3 bucket
-  # (athena-flowlogs-<env>) that is Plan 02-05's deliverable (D-27) — this
-  # module does not yet own the aws_flow_log resource that would satisfy
-  # this check. Tracked here, not silently ignored; Plan 02-05 removes this
-  # suppression when it adds that resource.
+  # CKV2_AWS_11's prior suppression is removed as of Plan 02-05, Task 2:
+  # flow-logs.tf now owns a real aws_flow_log resource on this VPC,
+  # delivering to the per-env athena-flowlogs-<env> bucket (D-27) — the
+  # check's own requirement is genuinely satisfied, not suppressed.
   # checkov:skip=CKV2_AWS_12: Default-SG lockdown (stripping the VPC's
   # default security group down to zero permissive rules) is Plan 02-05's
   # baseline-SG deliverable (D-28) — this module does not yet own that

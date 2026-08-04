@@ -65,3 +65,36 @@ skip-check:
   # deliberate architectural pattern, not a temporary gap this estate
   # intends to close later — genuinely correct to exclude estate-wide.
   - CKV2_AWS_19
+
+  # Three findings added by Plan 02-05, Task 2's flow-logs bucket — each
+  # estate-wide-permanent for the same underlying reason: this project is a
+  # strictly-$0, single-region (us-east-1-only), single-account-per-env
+  # LocalStack estate (CLAUDE.md constraints) with no cross-region, no
+  # dedicated log-archival account, and no event-driven S3 consumer wired
+  # anywhere in PROJECT.md's roadmap. Every one of these would apply
+  # identically to any future S3 bucket this repo ever creates (Phase 6's
+  # media bucket included), so they belong here, not as a per-resource
+  # inline suppression naming a future plan that does not exist.
+  #
+  # CKV_AWS_144 — "Ensure that S3 bucket has cross-region replication
+  # enabled." This estate has exactly one region (us-east-1) per
+  # environment; there is no second region to replicate to, and standing
+  # one up purely to satisfy this check would be infrastructure built for
+  # no functional reason.
+  - CKV_AWS_144
+  # CKV_AWS_18 — "Ensure the S3 bucket has access logging enabled." Access-
+  # logging a bucket requires a second, dedicated log-archival bucket (and
+  # that bucket cannot log to itself) — real production estates put this in
+  # a separate log-archival AWS account for exactly this reason. This
+  # project has no separate log-archival account (D-16's account-per-env
+  # simulation covers dev/stg/prod only) and no phase on the roadmap builds
+  # one; standing up an access-log bucket with nowhere coherent for its own
+  # logs to go would be theatre, not a control.
+  - CKV_AWS_18
+  # CKV2_AWS_62 — "Ensure S3 buckets should have event notifications
+  # enabled." Event notifications need a real consumer (SNS/SQS/Lambda) to
+  # be meaningful; nothing in this project's roadmap subscribes to bucket
+  # events for the flow-logs bucket or any bucket like it — wiring a
+  # notification target with no subscriber would be an unused resource that
+  # exists only to satisfy this finding.
+  - CKV2_AWS_62

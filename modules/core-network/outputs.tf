@@ -82,3 +82,20 @@ output "s3_vpc_endpoint_prefix_list_id" {
   description = "AWS-managed prefix list id the S3 gateway endpoint injects a route for into its attached route tables."
   value       = aws_vpc_endpoint.s3.prefix_list_id
 }
+
+# --- Plan 02-05, Task 2: flow-logs bucket + flow log outputs ---------------
+
+output "flow_logs_bucket_name" {
+  description = "Name of the per-environment VPC flow-logs S3 bucket (athena-flowlogs-<environment>)."
+  value       = aws_s3_bucket.flow_logs.bucket
+}
+
+output "flow_logs_bucket_arn" {
+  description = "ARN of the per-environment VPC flow-logs S3 bucket."
+  value       = aws_s3_bucket.flow_logs.arn
+}
+
+output "flow_log_id" {
+  description = "ID of the VPC flow log delivering to flow_logs_bucket_name."
+  value       = aws_flow_log.this.id
+}

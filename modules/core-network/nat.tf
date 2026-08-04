@@ -65,6 +65,13 @@ resource "aws_nat_gateway" "this" {
 
   tags = {
     Name = "${var.name_prefix}-${var.environment}-nat-${substr(each.value, -1, 1)}"
+    # Protection (docs/tagging-standard.md, Plan 02-05, Task 2): destroying
+    # a NAT gateway silently removes private-app egress for everything
+    # behind it — one of the two named resource classes in the tagging
+    # standard's own Protection list. Added alongside flow-logs.tf so the
+    # standard's claim about which resources carry this tag is true on
+    # every NAT gateway, not just documented as an intention.
+    Protection = "true"
   }
 
   depends_on = [aws_internet_gateway.this]
