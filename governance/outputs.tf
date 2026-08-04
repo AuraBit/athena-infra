@@ -42,6 +42,11 @@ output "team_ids" {
   }
 }
 
+output "developer_username" {
+  description = "The human developer's GitHub login (var.developer_username) — read by scripts/verify-governance.sh so its athena-infra stg/prod reviewer assertion (D-31, Plan 02-06 Task 3) compares against the live value rather than a second hardcoded literal."
+  value       = var.developer_username
+}
+
 output "infra_environment_variable_keys" {
   description = "athena-infra Environment names mapped to the Actions variable keys configured for each — the stable surface scripts/verify-governance.sh asserts against (Plan 02-06 Task 3) rather than duplicating environment-variables.tf's map."
   value       = { for env, vars in local.infra_env_variables_by_environment : env => sort(keys(vars)) }
