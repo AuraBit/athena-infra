@@ -42,6 +42,11 @@ output "team_ids" {
   }
 }
 
+output "infra_environment_variable_keys" {
+  description = "athena-infra Environment names mapped to the Actions variable keys configured for each — the stable surface scripts/verify-governance.sh asserts against (Plan 02-06 Task 3) rather than duplicating environment-variables.tf's map."
+  value       = { for env, vars in local.infra_env_variables_by_environment : env => sort(keys(vars)) }
+}
+
 output "team_slugs" {
   description = "Team slugs, keyed the same way as team_ids, for scripts/verify-governance.sh and any gh api verification calls."
   value = {
