@@ -121,6 +121,34 @@ resource "github_repository_ruleset" "app_main" {
 # to simulate on this repo — D-04), no merge queue (D-02 restricts the queue
 # to athena-app; this repo serialises concurrent changes at the
 # terraform-<env> Actions-concurrency-group layer Phase 2 adds instead).
+#
+# D-32 (Plan 02-06 Task 3): a second required_check, context = "gate" —
+# .github/workflows/terraform-core-network.yml's aggregator job id, read
+# from that file rather than typed from memory (the file's own job-level
+# comment records the same warning this file's header already states for
+# `lint`: a required check naming a job that has never reported once makes
+# `main` permanently unmergeable). Confirmed live, BEFORE this required
+# check was added, that `gate` had already reported on `main` at least once
+# (`gh api /repos/AuraBit/athena-infra/commits/main/check-runs` listed it
+# among seven check-run names from Plan 02-04/02-05's already-merged PRs) —
+# Phase 1's seed-and-prove-green-then-require ordering discipline, applied
+# a second time.
+#
+# Exactly ONE aggregated check is listed here, never the individual matrix
+# legs (`plan (dev)`, `plan (stg)`, `plan (prod)`, ...). A matrix leg for an
+# environment nobody touched in a given PR is a leg that never runs at all
+# — dorny/paths-filter reports no change for it, so
+# terraform-core-network.yml's `plan` job's `strategy.matrix.env` simply
+# never contains that leg — and a required check naming a leg that doesn't
+# run for most PRs leaves that PR pending forever. `gate` is the one job
+# that ALWAYS runs (`if: always()`, unconditional on every trigger) and
+# that internally distinguishes an intentional skip (empty changed_envs, a
+# modules-only PR; or a fork PR blocked by ADR-0006) from a leg that should
+# have run and did not — see that job's own inline comments for exactly how
+# it tells the two apart, including the empirically-discovered empty-matrix
+# GitHub Actions quirk (Plan 02-04's Task 3 finding) it accounts for. One
+# aggregator that always reports is the only shape compatible with a
+# change-detection matrix and a required status check at the same time.
 resource "github_repository_ruleset" "infra_main" {
   name        = "protect-main"
   repository  = github_repository.athena_infra.name
@@ -147,6 +175,9 @@ resource "github_repository_ruleset" "infra_main" {
     required_status_checks {
       required_check {
         context = "lint"
+      }
+      required_check {
+        context = "gate"
       }
     }
 

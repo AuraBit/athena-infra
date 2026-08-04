@@ -118,10 +118,15 @@ for repo in "${REPOS[@]}"; do
       ;;
   esac
 
-  if [ -n "${EXPECTED_CONTEXT}" ] && [ "${ACTUAL_CONTEXT}" = "${EXPECTED_CONTEXT}" ]; then
-    check "${repo}: required check context matches lint.yml's job id ('${EXPECTED_CONTEXT}')" 0
+  # "contains", not "equals": athena-infra (Plan 02-06, D-32) is the one
+  # repo whose required-check set grows to two entries (lint + the
+  # terraform-core-network.yml aggregator, asserted separately in section
+  # 10 below) -- for the other three repos, whose set has exactly one
+  # entry, "contains" and "equals" are the same assertion.
+  if [ -n "${EXPECTED_CONTEXT}" ] && printf '%s' "${ACTUAL_CONTEXT}" | tr ',' '\n' | grep -qx "${EXPECTED_CONTEXT}"; then
+    check "${repo}: required check context includes lint.yml's job id ('${EXPECTED_CONTEXT}')" 0
   else
-    check "${repo}: required check context matches lint.yml's job id" 1 \
+    check "${repo}: required check context includes lint.yml's job id" 1 \
       "expected=[${EXPECTED_CONTEXT}] actual=[${ACTUAL_CONTEXT}]"
   fi
 
@@ -251,6 +256,99 @@ if [ "${CODEOWNERS_ERR_COUNT}" = "0" ]; then
 else
   check "athena-app: zero CODEOWNERS errors reported by GitHub" 1 \
     "errors_count=[${CODEOWNERS_ERR_COUNT}]"
+fi
+
+# ---------------------------------------------------------------------------
+# 9. athena-infra Environments (D-31, D-13, Plan 02-06): exactly six, dev
+#    and the three -plan variants carry zero protection rules, stg/prod
+#    carry a required-reviewers rule naming the human developer (not the
+#    bot), and every one of the six carries exactly the five expected
+#    Actions variable names. The expected developer login and the expected
+#    variable-key set are both read from `terraform output` (governance
+#    stack), never retyped as a second hardcoded literal in this script.
+# ---------------------------------------------------------------------------
+TF_OUTPUT_JSON="$(cd "${GOV_DIR}" && TF_VAR_github_token="${GITHUB_TOKEN}" terraform output -json 2>/dev/null)"
+DEV_LOGIN="$(printf '%s' "${TF_OUTPUT_JSON}" | jq -r '.developer_username.value // empty')"
+EXPECTED_VAR_KEYS_JSON="$(printf '%s' "${TF_OUTPUT_JSON}" | jq -c '.infra_environment_variable_keys.value // {}')"
+
+INFRA_ENV_NAMES="$(gh_api "/repos/${GITHUB_OWNER}/athena-infra/environments" --jq '[.environments[].name] | sort | join(",")')"
+if [ "${INFRA_ENV_NAMES}" = "dev,dev-plan,prod,prod-plan,stg,stg-plan" ]; then
+  check "athena-infra environments are exactly the six D-31/D-13 names" 0
+else
+  check "athena-infra environments are exactly the six D-31/D-13 names" 1 "observed=[${INFRA_ENV_NAMES}]"
+fi
+
+for env in dev dev-plan stg-plan prod-plan; do
+  RULE_COUNT="$(gh_api "/repos/${GITHUB_OWNER}/athena-infra/environments/${env}" --jq '.protection_rules | length')"
+  if [ "${RULE_COUNT}" = "0" ]; then
+    check "athena-infra/${env}: zero protection rules" 0
+  else
+    check "athena-infra/${env}: zero protection rules" 1 "protection_rules_count=[${RULE_COUNT}]"
+  fi
+done
+
+for env in stg prod; do
+  REVIEWER_LOGINS="$(gh_api "/repos/${GITHUB_OWNER}/athena-infra/environments/${env}" --jq '[.protection_rules[] | select(.type=="required_reviewers") | .reviewers[].reviewer.login] | join(",")')"
+  if [ -n "${DEV_LOGIN}" ] && printf '%s' "${REVIEWER_LOGINS}" | grep -qx "${DEV_LOGIN}" && ! printf '%s' "${REVIEWER_LOGINS}" | grep -q "athena-ci-bot"; then
+    check "athena-infra/${env}: required reviewer is the human developer, not the bot (D-31)" 0
+  else
+    check "athena-infra/${env}: required reviewer is the human developer, not the bot (D-31)" 1 \
+      "expected_login=[${DEV_LOGIN}] observed=[${REVIEWER_LOGINS}]"
+  fi
+done
+
+for env in dev dev-plan stg stg-plan prod prod-plan; do
+  EXPECTED_KEYS="$(printf '%s' "${EXPECTED_VAR_KEYS_JSON}" | jq -r --arg e "${env}" '.[$e] // [] | sort | join(",")')"
+  ACTUAL_KEYS="$(gh_api "/repos/${GITHUB_OWNER}/athena-infra/environments/${env}/variables" --jq '[.variables[].name] | sort | join(",")')"
+  if [ -n "${EXPECTED_KEYS}" ] && [ "${ACTUAL_KEYS}" = "${EXPECTED_KEYS}" ]; then
+    check "athena-infra/${env}: carries exactly the expected Actions variable keys" 0
+  else
+    check "athena-infra/${env}: carries exactly the expected Actions variable keys" 1 \
+      "expected=[${EXPECTED_KEYS}] actual=[${ACTUAL_KEYS}]"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# 10. athena-infra's main ruleset requires the aggregator check by its exact
+#     reported name (D-32). The expected context is extracted from
+#     terraform-core-network.yml itself, not typed a second time here: the
+#     aggregator job is identified structurally (needs exactly
+#     [detect-changes, static, plan] and `if: always()`, matching that
+#     job's own header comment), so a rename of the job in the workflow
+#     changes what this script expects instead of silently going stale.
+# ---------------------------------------------------------------------------
+aggregator_job_id() {
+  python3 - "${SCRIPT_DIR}/../.github/workflows/terraform-core-network.yml" <<'PY' 2>/dev/null
+import sys, yaml
+try:
+    with open(sys.argv[1]) as f:
+        data = yaml.safe_load(f)
+    for job_id, job in data["jobs"].items():
+        needs = job.get("needs", [])
+        if isinstance(needs, str):
+            needs = [needs]
+        if sorted(needs) == sorted(["detect-changes", "static", "plan"]) and job.get("if") == "always()":
+            print(job_id)
+            break
+except Exception:
+    pass
+PY
+}
+
+EXPECTED_AGGREGATOR="$(aggregator_job_id)"
+INFRA_REQUIRED_CONTEXTS="$(gh_api "/repos/${GITHUB_OWNER}/athena-infra/rules/branches/main" --jq '[.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context] | sort | join(",")')"
+if [ -n "${EXPECTED_AGGREGATOR}" ] && printf '%s' "${INFRA_REQUIRED_CONTEXTS}" | tr ',' '\n' | grep -qx "${EXPECTED_AGGREGATOR}"; then
+  check "athena-infra: main ruleset requires the aggregator check ('${EXPECTED_AGGREGATOR}', extracted from the workflow)" 0
+else
+  check "athena-infra: main ruleset requires the aggregator check (extracted from the workflow)" 1 \
+    "expected=[${EXPECTED_AGGREGATOR}] required_contexts=[${INFRA_REQUIRED_CONTEXTS}]"
+fi
+
+if printf '%s' "${INFRA_REQUIRED_CONTEXTS}" | tr ',' '\n' | grep -qx "lint"; then
+  check "athena-infra: main ruleset still requires 'lint' alongside the aggregator" 0
+else
+  check "athena-infra: main ruleset still requires 'lint' alongside the aggregator" 1 \
+    "required_contexts=[${INFRA_REQUIRED_CONTEXTS}]"
 fi
 
 # ---------------------------------------------------------------------------
