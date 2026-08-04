@@ -170,11 +170,11 @@ echo
 # ---------------------------------------------------------------------------
 log_evidence "## Scenario 1 — same environment (dev) twice"
 
-RUN1="$(dispatch_run dev 20)" || { check "scenario 1: same-env queuing" 1 "dispatch_run for RUN1 (dev, hold=20) never produced a new run id within 40s"; RUN1=""; }
+RUN1="$(dispatch_run dev 130)" || { check "scenario 1: same-env queuing" 1 "dispatch_run for RUN1 (dev, hold=130) never produced a new run id within 40s"; RUN1=""; }
 if [ -n "${RUN1}" ]; then
-  log_evidence "RUN1 dispatched dev hold=20s at $(ts) -> $(run_url "${RUN1}")"
+  log_evidence "RUN1 dispatched dev hold=130s at $(ts) -> $(run_url "${RUN1}")"
 
-  ST1="$(wait_for_job_status "${RUN1}" "apply (dev)" 90 in_progress completed)"
+  ST1="$(wait_for_job_status "${RUN1}" "apply (dev)" 150 in_progress completed)"
   T1_START="$(ts)"
   log_evidence "RUN1 apply(dev) reached status='${ST1}' at ${T1_START}"
 
@@ -183,8 +183,17 @@ if [ -n "${RUN1}" ]; then
     T2_DISPATCH="$(ts)"
     log_evidence "RUN2 dispatched dev hold=0s at ${T2_DISPATCH} -> $(run_url "${RUN2}")"
 
-    sleep 4
-    ST2_PENDING="$(job_field "${RUN2}" "apply (dev)" status)"
+    # Poll (rather than a single fixed-delay snapshot). Empirically, GitHub
+    # does not list a job in the /jobs response AT ALL until its own
+    # `needs:` are satisfied (detect-changes+static, ~85-100s observed) --
+    # so a job genuinely blocked on the concurrency group only becomes
+    # visible as "queued" once that needs-wait clears, not immediately
+    # after dispatch. The window below has to comfortably exceed that
+    # needs-wait, not just the lock/apply window itself.
+    # "pending" is empirically observed alongside "queued" as GitHub's
+    # not-yet-started job status (exact string varies run to run) -- both
+    # mean the same thing for this assertion: the job has not started.
+    ST2_PENDING="$(wait_for_job_status "${RUN2}" "apply (dev)" 140 queued pending in_progress completed)"
     T2_PENDING_OBS="$(ts)"
     log_evidence "RUN2 apply(dev) status ${T2_PENDING_OBS}: '${ST2_PENDING}' (expected: queued, while RUN1 is still in flight)"
 
@@ -203,12 +212,17 @@ if [ -n "${RUN1}" ]; then
     log_evidence "RUN2 apply(dev) completed at ${T2_END}, conclusion='${CONCL2}'"
 
     SC1_FAIL=0
-    [ "${ST2_PENDING}" = "queued" ] || SC1_FAIL=1
+    [ "${ST2_PENDING}" = "queued" ] || [ "${ST2_PENDING}" = "pending" ] || SC1_FAIL=1
     [ "${CONCL1}" = "success" ] || SC1_FAIL=1
     [ "${CONCL2}" = "success" ] || SC1_FAIL=1
+    # The real non-collision proof: RUN2's apply(dev) must not have STARTED
+    # until strictly after RUN1's apply(dev) COMPLETED -- "queued" alone is
+    # ambiguous about cause (it is also what an unmet `needs:` shows), this
+    # ordering is not.
+    [[ "${T2_START}" > "${T1_END}" ]] || SC1_FAIL=1
 
-    check "scenario 1: RUN2 (dev) queued behind RUN1 (dev) then both completed successfully — RUN1=$(run_url "${RUN1}") RUN2=$(run_url "${RUN2}")" "${SC1_FAIL}" \
-      "RUN2 pending status='${ST2_PENDING}' (want queued); RUN1 conclusion='${CONCL1}'; RUN2 conclusion='${CONCL2}'"
+    check "scenario 1: RUN2 (dev) queued behind RUN1 (dev), started only after RUN1 completed, then both completed successfully — RUN1=$(run_url "${RUN1}") RUN2=$(run_url "${RUN2}")" "${SC1_FAIL}" \
+      "RUN2 pending status='${ST2_PENDING}' (want queued); RUN1 end=${T1_END} RUN2 start=${T2_START} (want RUN2 start > RUN1 end); RUN1 conclusion='${CONCL1}'; RUN2 conclusion='${CONCL2}'"
   fi
 fi
 echo
@@ -219,24 +233,29 @@ echo
 # ---------------------------------------------------------------------------
 log_evidence "## Scenario 2 — two different environments (dev + stg) concurrently"
 
-RUN3="$(dispatch_run dev 25)" || { check "scenario 2: cross-env concurrency" 1 "dispatch_run for RUN3 (dev, hold=25) never produced a new run id within 40s"; RUN3=""; }
+RUN3="$(dispatch_run dev 130)" || { check "scenario 2: cross-env concurrency" 1 "dispatch_run for RUN3 (dev, hold=130) never produced a new run id within 40s"; RUN3=""; }
 if [ -n "${RUN3}" ]; then
-  log_evidence "RUN3 dispatched dev hold=25s at $(ts) -> $(run_url "${RUN3}")"
+  log_evidence "RUN3 dispatched dev hold=130s at $(ts) -> $(run_url "${RUN3}")"
 
-  wait_for_job_status "${RUN3}" "apply (dev)" 90 in_progress completed >/dev/null
+  wait_for_job_status "${RUN3}" "apply (dev)" 150 in_progress completed >/dev/null
   T3_START="$(ts)"
   log_evidence "RUN3 apply(dev) in_progress observed at ${T3_START}"
 
-  RUN4="$(dispatch_run stg 25)" || { check "scenario 2: cross-env concurrency" 1 "dispatch_run for RUN4 (stg, hold=25) never produced a new run id within 40s"; RUN4=""; }
+  RUN4="$(dispatch_run stg 20)" || { check "scenario 2: cross-env concurrency" 1 "dispatch_run for RUN4 (stg, hold=20) never produced a new run id within 40s"; RUN4=""; }
   if [ -n "${RUN4}" ]; then
-    log_evidence "RUN4 dispatched stg hold=25s at $(ts) -> $(run_url "${RUN4}")"
+    log_evidence "RUN4 dispatched stg hold=20s at $(ts) -> $(run_url "${RUN4}")"
 
     # stg's apply job binds a gated Environment (governance/environments.tf,
     # D-31) — approve as soon as the pending deployment appears so the
     # in-flight window genuinely overlaps RUN3's, using the same human
     # reviewer identity Plan 02-08's gated promotion already used live.
+    # apply's own `needs: [detect-changes, static]` means this job cannot
+    # even register a pending_deployment until BOTH of those complete --
+    # static alone has been observed taking 80-100s -- so this loop's
+    # window has to comfortably exceed that, not just the lock/apply
+    # window itself.
     APPROVED=1
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 120); do
       if approve_pending_deployment "${RUN4}" stg; then
         APPROVED=0
         log_evidence "RUN4 pending deployment for stg approved at $(ts)"
@@ -244,11 +263,44 @@ if [ -n "${RUN3}" ]; then
       fi
       sleep 2
     done
-    [ "${APPROVED}" -eq 0 ] || log_evidence "WARNING: never observed an approvable pending_deployment for RUN4/stg within 60s"
+    [ "${APPROVED}" -eq 0 ] || log_evidence "WARNING: never observed an approvable pending_deployment for RUN4/stg within 240s"
 
     ST4="$(wait_for_job_status "${RUN4}" "apply (stg)" 90 in_progress completed)"
     T4_START="$(ts)"
     log_evidence "RUN4 apply(stg) reached status='${ST4}' at ${T4_START}"
+
+    # Direct dual-sample overlap proof, not an inference from two
+    # separately-polled start/end timestamps. Comparing coarse,
+    # independently-polled timestamps is provably unreliable here: this
+    # estate's runner pool has exactly 2 ephemeral self-hosted instances
+    # sharing one install directory's `.runner`/`.credentials` files
+    # (STATE.md, Plan 02-02 decision log) -- GitHub Actions can end up
+    # dispatching every job in a short window to the SAME single instance,
+    # one after another, and a start-timestamp that lands within one 2s
+    # poll tick of the other job's end-timestamp can satisfy a naive
+    # "T4_START < T3_END" comparison despite the two jobs never actually
+    # having run at the same wall-clock instant. Sampling BOTH jobs'
+    # status together and requiring several CONSECUTIVE ticks where both
+    # read "in_progress" is what a serialized-but-adjacent pair cannot
+    # produce.
+    CONCURRENT_TICKS=0
+    OVERLAP_ELAPSED=0
+    while [ "${OVERLAP_ELAPSED}" -lt 60 ]; do
+      S3="$(job_field "${RUN3}" "apply (dev)" status)"
+      S4="$(job_field "${RUN4}" "apply (stg)" status)"
+      if [ "${S3}" = "in_progress" ] && [ "${S4}" = "in_progress" ]; then
+        CONCURRENT_TICKS=$((CONCURRENT_TICKS + 1))
+        log_evidence "dual-sample at $(ts): RUN3=${S3} RUN4=${S4} (concurrent tick ${CONCURRENT_TICKS})"
+      else
+        log_evidence "dual-sample at $(ts): RUN3=${S3} RUN4=${S4}"
+      fi
+      if [ "${S3}" = "completed" ] || [ "${S4}" = "completed" ]; then
+        break
+      fi
+      sleep 2
+      OVERLAP_ELAPSED=$((OVERLAP_ELAPSED + 2))
+    done
+    log_evidence "dual-sample overlap: ${CONCURRENT_TICKS} consecutive-or-total tick(s) with both jobs simultaneously in_progress (want >= 2, i.e. >= ~4s of genuine overlap)"
 
     wait_for_job_status "${RUN3}" "apply (dev)" 180 completed >/dev/null
     T3_END="$(ts)"
@@ -263,13 +315,12 @@ if [ -n "${RUN3}" ]; then
     log_evidence "overlap check: RUN3 window [${T3_START} .. ${T3_END}]; RUN4 window [${T4_START} .. ${T4_END}]"
 
     SC2_FAIL=0
-    [ "${ST4}" = "in_progress" ] || SC2_FAIL=1
-    [[ "${T4_START}" < "${T3_END}" ]] || SC2_FAIL=1
+    [ "${CONCURRENT_TICKS}" -ge 2 ] || SC2_FAIL=1
     [ "${CONCL3}" = "success" ] || SC2_FAIL=1
     [ "${CONCL4}" = "success" ] || SC2_FAIL=1
 
-    check "scenario 2: RUN3 (dev) and RUN4 (stg) ran concurrently, both completed successfully — RUN3=$(run_url "${RUN3}") RUN4=$(run_url "${RUN4}")" "${SC2_FAIL}" \
-      "RUN4 status when observed='${ST4}'; RUN3 window=[${T3_START}..${T3_END}]; RUN4 window=[${T4_START}..${T4_END}]; conclusions dev='${CONCL3}' stg='${CONCL4}'"
+    check "scenario 2: RUN3 (dev) and RUN4 (stg) ran concurrently (>= 2 dual-sampled in_progress ticks), both completed successfully — RUN3=$(run_url "${RUN3}") RUN4=$(run_url "${RUN4}")" "${SC2_FAIL}" \
+      "concurrent dual-sample ticks=${CONCURRENT_TICKS} (want >=2); RUN3 window=[${T3_START}..${T3_END}]; RUN4 window=[${T4_START}..${T4_END}]; conclusions dev='${CONCL3}' stg='${CONCL4}'. If this fails with 0 concurrent ticks despite both jobs eventually succeeding, the runner pool likely only had one of its two ephemeral instances genuinely accepting jobs at the time -- see docs/drills/concurrency-queue.md and STATE.md's runner-pool flakiness item (Plan 02-02-scoped, pre-existing) before assuming the concurrency-group scoping itself is broken."
   fi
 fi
 echo
@@ -290,7 +341,7 @@ RUN5="$(dispatch_run dev 25)" || { check "scenario 3: plan-during-apply" 1 "disp
 if [ -n "${RUN5}" ]; then
   log_evidence "RUN5 dispatched dev hold=25s at $(ts) -> $(run_url "${RUN5}")"
 
-  wait_for_job_status "${RUN5}" "apply (dev)" 90 in_progress completed >/dev/null
+  wait_for_job_status "${RUN5}" "apply (dev)" 150 in_progress completed >/dev/null
   T5_START="$(ts)"
   log_evidence "RUN5 apply(dev) in_progress observed at ${T5_START}"
 
