@@ -454,28 +454,44 @@ jobs:
             FAIL=1
           fi
 
-          if [ "${PLAN_RESULT}" = "failure" ] || [ "${PLAN_RESULT}" = "cancelled" ]; then
-            echo "FAIL: plan reported '${PLAN_RESULT}'"
+          if [ "${PLAN_RESULT}" = "cancelled" ]; then
+            echo "FAIL: plan was cancelled"
             FAIL=1
-          elif [ "${PLAN_RESULT}" = "skipped" ]; then
-            # A skip is legitimate in exactly two cases: this run is a push
-            # (plan never runs on push by design -- apply owns push), or
-            # detect-changes genuinely found nothing to plan (a
-            # modules-only PR, or a PR touching an env this repo doesn't
-            # have yet). Any OTHER skip -- most notably a pull request that
-            # DID touch an env directory but whose head repo failed the
-            # same-repo-branch check (a fork PR, ADR-0006) -- is a leg that
-            # should have run and did not, and that is a gate failure, not
-            # a silently-accepted skip. This is deliberate: a fork PR
-            # touching envs/dev has nothing for a human to review (no plan
-            # ever ran), so a green gate for it would be exactly the
-            # silent hole Pitfall 3 warns about.
+          elif [ "${PLAN_RESULT}" = "failure" ] || [ "${PLAN_RESULT}" = "skipped" ]; then
+            # Both "failure" and "skipped" are handled by the SAME
+            # changed_envs/event test below -- this is not a shortcut, it
+            # is an empirically-discovered GitHub Actions quirk (Pitfall
+            # 3's "matrix/required-check interaction GitHub has not fully
+            # closed"), proven live in this plan: a job whose own `if:`
+            # evaluates false (the fork-PR trust-boundary case, ADR-0006)
+            # correctly reports "skipped" -- but a job whose `if:` is TRUE
+            # yet whose `strategy.matrix` evaluates to an EMPTY array (a
+            # genuine modules-only PR, changed_envs == '[]') reports
+            # "failure", not "skipped", on this GitHub Actions version.
+            # Treating them identically, gated on the SAME two conditions
+            # below, is what makes the gate correct in both directions:
+            # - event == push: plan never runs on push by design (apply
+            #   owns push) -- OK regardless of which of the two result
+            #   values GitHub happened to report.
+            # - detect-changes reported an EMPTY environment array
+            #   (changed_envs == '[]', e.g. a modules-only PR): there was
+            #   genuinely nothing to plan -- OK regardless of whether
+            #   GitHub called that "failure" (empty-matrix quirk) or
+            #   "skipped" (if: false).
+            # - anything else -- a NON-empty changed_envs whose plan leg
+            #   is either skipped (a fork PR blocked by ADR-0006's guard,
+            #   with nothing for a human to review) or genuinely failed
+            #   (a real terraform error inside a matrix leg) -- is a leg
+            #   that should have run and did not (or did and broke), and
+            #   that is a gate failure either way. This is deliberate:
+            #   silently accepting either case here is exactly the hole
+            #   Pitfall 3 warns about.
             if [ "${EVENT}" = "push" ]; then
-              echo "OK: plan is intentionally skipped on push events (apply owns push, not plan)"
+              echo "OK: plan is intentionally not present on push events (apply owns push, not plan); reported '${PLAN_RESULT}'"
             elif [ "${CHANGED_ENVS}" = "[]" ]; then
-              echo "OK: plan is intentionally skipped -- detect-changes reported an empty environment array (e.g. a modules-only PR)"
+              echo "OK: plan had nothing to do -- detect-changes reported an empty environment array (e.g. a modules-only PR); GitHub reported this leg as '${PLAN_RESULT}'"
             else
-              echo "FAIL: plan was skipped but detect-changes reported changed_envs=${CHANGED_ENVS} -- a leg that should have run did not (see ADR-0006 if this is a fork PR)"
+              echo "FAIL: plan reported '${PLAN_RESULT}' but detect-changes reported changed_envs=${CHANGED_ENVS} -- a leg that should have run either did not run at all (see ADR-0006 if this is a fork PR) or ran and failed"
               FAIL=1
             fi
           fi
