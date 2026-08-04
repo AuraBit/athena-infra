@@ -15,14 +15,18 @@ name: heavy-selfhosted
 # second; both are required because either alone can be misconfigured.
 #
 # ADR-0006 (Plan 02-04) amends CI-06's estate-wide wording from
-# "protected-branch pushes only" to "trusted contexts only" — same-repo-
-# branch pull requests may now reach a self-hosted job elsewhere in this
-# estate (terraform-core-network.yml's `plan` job), guarded per-job by
-# `github.event.pull_request.head.repo.full_name == github.repository`.
-# This workflow's OWN triggers are deliberately untouched by that
-# amendment: nothing here needs pull-request-time self-hosted execution
-# (image builds run fine push-only), so it stays on the stricter,
-# original leg of CI-06 rather than picking up the new one for no reason.
+# "protected-branch pushes only" to "trusted contexts only" — a same-repo
+# branch's proposed-code event may now reach a self-hosted job elsewhere in
+# this estate (terraform-core-network.yml's `plan` job), guarded per-job by
+# a same-repo-head-branch check evaluated against the triggering event (see
+# ADR-0006 for the exact guard expression -- deliberately not repeated
+# verbatim here, so scripts/verify-runner.sh's no-PR-family-trigger grep
+# check on THIS file's contents stays meaningful and isn't false-tripped by
+# a comment merely discussing the concept). This workflow's OWN triggers
+# are deliberately untouched by that amendment: nothing here needs
+# proposed-code-time self-hosted execution (image builds run fine
+# push-only), so it stays on the stricter, original leg of CI-06 rather
+# than picking up the new one for no reason.
 on:
   push:
     branches: [main]
