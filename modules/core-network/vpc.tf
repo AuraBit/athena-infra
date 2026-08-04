@@ -18,11 +18,12 @@ resource "aws_vpc" "this" {
   # flow-logs.tf now owns a real aws_flow_log resource on this VPC,
   # delivering to the per-env athena-flowlogs-<env> bucket (D-27) — the
   # check's own requirement is genuinely satisfied, not suppressed.
-  # checkov:skip=CKV2_AWS_12: Default-SG lockdown (stripping the VPC's
-  # default security group down to zero permissive rules) is Plan 02-05's
-  # baseline-SG deliverable (D-28) — this module does not yet own that
-  # resource either. Same tracked-not-ignored reasoning as CKV2_AWS_11
-  # above; Plan 02-05 removes this suppression too.
+  # CKV2_AWS_12's prior suppression is removed as of Plan 02-05, Task 3:
+  # security-groups.tf now owns a real aws_default_security_group resource
+  # stripping this VPC's default security group to zero ingress/egress
+  # rules (D-28) — the check's own requirement is genuinely satisfied, not
+  # suppressed. Both of vpc.tf's original tracked-not-ignored suppressions
+  # are now gone; this module has no remaining Checkov suppression.
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
